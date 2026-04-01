@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { HeaderAuth } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
+import ParticleBackground from "@/components/ui/particle-background";
 
 const features = [
   {
@@ -88,12 +89,15 @@ export default function Home() {
   }, []);
 
   return (
-    <div className="flex-1 w-full flex flex-col items-center">
-      <HeaderAuth />
+    <div className="flex-1 w-full flex flex-col items-center relative">
+      <ParticleBackground />
+      <div className="w-full relative z-10">
+        <HeaderAuth />
+      </div>
 
       {/* ===== HERO SECTION ===== */}
       <div ref={heroRef} className="flex flex-col items-center w-full relative overflow-hidden">
-        {/* Static glow */}
+        
         <div className="hero-glow" aria-hidden="true" />
 
         {/* Mouse-following glow */}
