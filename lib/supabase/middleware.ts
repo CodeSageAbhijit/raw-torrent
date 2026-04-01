@@ -15,7 +15,7 @@ export async function updateSession(request: NextRequest) {
           return request.cookies.getAll()
         },
         setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) => request.cookies.set(name, value))
+          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value))
           supabaseResponse = NextResponse.next({
             request,
           })
@@ -33,9 +33,10 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser()
 
   const isAuthRoute = request.nextUrl.pathname.startsWith('/login') || request.nextUrl.pathname.startsWith('/signup')
+  const isCallbackRoute = request.nextUrl.pathname.startsWith('/auth/callback')
 
-  // If user is not logged in and not on auth routes, redirect to login
-  if (!user && !isAuthRoute && request.nextUrl.pathname !== '/') {
+  // If user is not logged in and not on auth routes/callback, redirect to login
+  if (!user && !isAuthRoute && !isCallbackRoute && request.nextUrl.pathname !== '/') {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)

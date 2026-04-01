@@ -11,7 +11,6 @@ import {
   formatSpeed,
 } from "@/lib/mock-data";
 
-const mapUrl = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 const LOCAL_CLIENT_COORD: [number, number] = [-74.006, 40.7128]; // NY
 
 const generatedLogs = [

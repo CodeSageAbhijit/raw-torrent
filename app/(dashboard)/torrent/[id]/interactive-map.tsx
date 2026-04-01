@@ -16,7 +16,13 @@ export default function InteractiveMap({
   peerSnapshots,
   localCoord,
 }: {
-  peerSnapshots: any[];
+  peerSnapshots: {
+    id: string;
+    ip: string;
+    coordinates: [number, number];
+    downloadMbps: number;
+    uploadMbps: number;
+  }[];
   localCoord: [number, number];
 }) {
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);

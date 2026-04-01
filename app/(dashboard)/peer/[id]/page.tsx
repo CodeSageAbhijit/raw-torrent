@@ -120,8 +120,10 @@ export default async function PeerPage({
           <h2 className="font-medium mb-4">Bandwidth Over Time</h2>
           <div className="h-32 flex items-end gap-1">
             {Array.from({ length: 48 }).map((_, i) => {
+              // Deterministic pseudo-random height based on index
+              const pseudoRandom = (Math.sin(i * 12.9898) * 43758.5453) % 1;
               const height =
-                20 + Math.sin(i * 0.3) * 40 + Math.random() * 30;
+                20 + Math.sin(i * 0.3) * 40 + Math.abs(pseudoRandom) * 30;
               return (
                 <div
                   key={i}
