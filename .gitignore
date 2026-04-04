@@ -1,0 +1,57 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# nested workspaces (backend)
+rawtorrent_backend/node_modules/
+rawtorrent_backend/dist/
+rawtorrent_backend/torrent_storage/
+
+# local scratch notes
+*context*.md
+*steps*.md
+
+# Chat notes and patches
+.snapshots/
+how_torrent_works.txt
+plan.md
+fix*.js
+clean*.js
