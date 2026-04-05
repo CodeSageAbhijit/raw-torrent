@@ -83,3 +83,17 @@ export interface StartTorrentOptions {
   userId?: string;
   selectedFileIndices?: number[];
 }
+
+export interface ResumableSessionRecord {
+  sessionId: string;
+  userId?: string;
+  fileName: string;
+  sourceType: "magnet" | "torrent-file";
+  magnetUri?: string;
+  torrentFilePath?: string;
+  selectedFileIndices?: number[];
+  status: "starting" | "running" | "paused";
+  seeding: boolean;
+  createdAt: number;
+  updatedAt: number;
+}

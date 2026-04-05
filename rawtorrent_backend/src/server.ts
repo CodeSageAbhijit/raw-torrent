@@ -3,6 +3,7 @@ import http from "http";
 import dotenv from "dotenv";
 import cors from "cors";
 import torrentRoutes from "./routes/torrent.routes";
+import { restorePersistedTorrentsOnBoot } from "./services/torrentService";
 import { setupWebSocket } from "./ws/socket";
 import { logger } from "./utils/logger";
 
@@ -45,6 +46,13 @@ export const startServer = () => {
 
   server.listen(port, () => {
     logger.info(`RawTorrent backend listening on port ${port}`);
+
+    void restorePersistedTorrentsOnBoot().catch((error) => {
+      logger.error(
+        "Auto-resume bootstrap failed",
+        error instanceof Error ? error.message : String(error)
+      );
+    });
   });
 
   return server;

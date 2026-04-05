@@ -138,3 +138,44 @@ export const listSessionEvents = async (sessionId: string): Promise<TorrentEvent
   memoryEvents.set(sessionId, events);
   return events;
 };
+
+export const deleteSessionPersistence = async (sessionId: string, userId?: string) => {
+  const sessionFromMemory = memorySessions.get(sessionId);
+  const resolvedUserId = userId ?? sessionFromMemory?.userId;
+
+  memorySessions.delete(sessionId);
+  memoryEvents.delete(sessionId);
+
+  if (resolvedUserId) {
+    const known = memoryUserIndex.get(resolvedUserId);
+    if (known) {
+      known.delete(sessionId);
+      if (known.size === 0) {
+        memoryUserIndex.delete(resolvedUserId);
+      }
+    }
+  } else {
+    for (const [indexUserId, known] of memoryUserIndex.entries()) {
+      if (!known.has(sessionId)) {
+        continue;
+      }
+
+      known.delete(sessionId);
+      if (known.size === 0) {
+        memoryUserIndex.delete(indexUserId);
+      }
+    }
+  }
+
+  await withRedis(async (redis) => {
+    const transaction = redis.multi();
+    transaction.del(sessionKey(sessionId));
+    transaction.del(eventsKey(sessionId));
+
+    if (resolvedUserId) {
+      transaction.srem(userSessionsKey(resolvedUserId), sessionId);
+    }
+
+    await transaction.exec();
+  });
+};

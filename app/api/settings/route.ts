@@ -1,11 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Note: The actual settings are managed by the backend services via the shared settings module
-// This API acts as the frontend interface to get/set those settings
-
-// Import from backend settings module  
-// Since this is a Next.js frontend API route, we can't directly import backend modules
-// Instead, we'll recreate the settings management logic here that mirrors the backend
+// Proxy settings directly to backend torrent service.
+// This keeps the dashboard UI and backend runtime in sync.
 
 interface Settings {
   port: number;
@@ -21,25 +17,27 @@ interface Settings {
   enableDHT: boolean;
   pieceSelectionStrategy: "sequential" | "random" | "rarest-first";
   peerConnectionTimeoutMs: number;
+  turboMode: boolean;
+  adaptiveTuning: boolean;
   extraTrackers: string[];
 }
 
-// In-memory settings store (persists during server runtime)
-// This mirrors the settings in the backend services
-let runtimeSettings: Settings = {
+const DEFAULT_SETTINGS: Settings = {
   port: parseInt(process.env.P2P_PORT || "6881"),
-  maxPeers: 250,
-  downloadLimit: 0,
-  uploadLimit: 0,
-  maxRequestsPerPeer: 10,
-  requestTimeoutMs: 30000,
-  trackerAnnounceInterval: parseInt(process.env.TRACKER_REFRESH_SECONDS || "60"),
-  trackerNumwant: parseInt(process.env.TRACKER_NUMWANT || "500"),
+  maxPeers: 120,
+  downloadLimit: 12288,
+  uploadLimit: 1024,
+  maxRequestsPerPeer: 20,
+  requestTimeoutMs: 20000,
+  trackerAnnounceInterval: parseInt(process.env.TRACKER_REFRESH_SECONDS || "45"),
+  trackerNumwant: parseInt(process.env.TRACKER_NUMWANT || "350"),
   autoPickBestPeers: true,
   enablePEX: true,
   enableDHT: process.env.ENABLE_DHT_DISCOVERY !== "false",
   pieceSelectionStrategy: "rarest-first",
-  peerConnectionTimeoutMs: parseInt(process.env.PEER_CONNECTION_TIMEOUT_MS || "15000"),
+  peerConnectionTimeoutMs: parseInt(process.env.PEER_CONNECTION_TIMEOUT_MS || "12000"),
+  turboMode: true,
+  adaptiveTuning: true,
   extraTrackers: [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://tracker.openbittorrent.com:80/announce",
@@ -58,19 +56,34 @@ let runtimeSettings: Settings = {
   ],
 };
 
-export async function GET(request: NextRequest) {
-  try {
-    // Return current settings
-    // NOTE: Changes made here are applied to the backend immediately
-    // via the shared backend settings module when new torrents start
+const getBackendBaseUrl = () =>
+  process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_BACKEND_HTTP_URL ?? "http://localhost:4000";
 
-    return NextResponse.json(runtimeSettings, { status: 200 });
+const getBackendSettingsUrl = () => {
+  const base = getBackendBaseUrl().replace(/\/$/, "");
+  return base.endsWith("/torrent") ? `${base}/settings` : `${base}/torrent/settings`;
+};
+
+export async function GET(_request: NextRequest) {
+  try {
+    const response = await fetch(getBackendSettingsUrl(), {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return NextResponse.json(DEFAULT_SETTINGS, { status: 200 });
+    }
+
+    const payload = (await response.json()) as {
+      success?: boolean;
+      data?: Settings;
+    };
+
+    return NextResponse.json(payload.data ?? DEFAULT_SETTINGS, { status: 200 });
   } catch (error) {
     console.error("Failed to fetch settings:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch settings" },
-      { status: 500 }
-    );
+    return NextResponse.json(DEFAULT_SETTINGS, { status: 200 });
   }
 }
 
@@ -86,36 +99,46 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Update runtime settings - these are used by the backend immediately
-    runtimeSettings = {
-      ...runtimeSettings,
+    const nextSettings = {
+      ...DEFAULT_SETTINGS,
       ...body,
-    };
+    } as Settings;
 
-    // Notify backend to update its settings
     try {
-      const backendUrl = process.env.BACKEND_URL || "http://localhost:3001";
-      await fetch(`${backendUrl}/settings`, {
+      const response = await fetch(getBackendSettingsUrl(), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(runtimeSettings),
-      }).catch(() => {
-        // Non-blocking - backend update is async
+        body: JSON.stringify(nextSettings),
       });
+
+      if (!response.ok) {
+        const text = await response.text();
+        return NextResponse.json(
+          { error: `Backend settings update failed: ${text || response.statusText}` },
+          { status: 502 }
+        );
+      }
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        data?: Settings;
+      };
+
+      return NextResponse.json(
+        {
+          success: true,
+          message: "Settings updated. New downloads will use these settings immediately.",
+          updatedSettings: payload.data ?? nextSettings,
+        },
+        { status: 200 }
+      );
     } catch (err) {
-      // Silently fail - settings are still updated in frontend
+      console.error("Backend settings update failed:", err);
+      return NextResponse.json(
+        { error: "Failed to update backend settings" },
+        { status: 502 }
+      );
     }
-
-    console.log("[Settings Updated] Applied immediately to new torrents");
-
-    return NextResponse.json(
-      {
-        success: true,
-        message: "Settings updated. New downloads will use these settings immediately.",
-        updatedSettings: runtimeSettings,
-      },
-      { status: 200 }
-    );
   } catch (error) {
     console.error("Failed to save settings:", error);
     return NextResponse.json(

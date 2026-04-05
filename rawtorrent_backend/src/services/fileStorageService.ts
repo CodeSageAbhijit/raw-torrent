@@ -1,12 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import type { ResumableSessionRecord } from "../types/torrent";
 
 export interface SessionStoragePaths {
   rootDir: string;
   sessionDir: string;
   piecesDir: string;
   finalFilePath: string;
+  sourceFilePath: string;
   stateFilePath: string;
   metadataFilePath: string;
 }
@@ -23,16 +25,20 @@ export interface SessionDownloadMetadata {
 
 const sanitizeFileName = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, "_");
 
+const getDefaultStorageRootDir = () => {
+  if (process.platform === "win32") {
+    const systemDrive = String(process.env.SystemDrive ?? "C:").trim() || "C:";
+    return path.join(systemDrive, "rawtorrent-data");
+  }
+
+  return path.join(os.homedir(), "rawtorrent-data");
+};
+
 export const getStorageRootDir = () => {
   const configured = process.env.TORRENT_STORAGE_DIR?.trim();
-  
-  // Automatically fallback to the user's native "Downloads/Torrents" folder across any OS 
-  // (Windows, macOS, Linux, etc) instead of hardcoding a path.
-  const nativeDownloadsDir = path.join(os.homedir(), "Downloads", "rawtorrent");
 
-  return configured && configured.length > 0
-    ? configured
-    : nativeDownloadsDir;
+  // Keep torrent payloads out of user-profile folders by default for steadier 24/7 writes.
+  return configured && configured.length > 0 ? configured : getDefaultStorageRootDir();
 };
 
 export const getSessionStoragePaths = (sessionId: string, fileName = "download.bin"): SessionStoragePaths => {
@@ -46,10 +52,13 @@ export const getSessionStoragePaths = (sessionId: string, fileName = "download.b
     sessionDir,
     piecesDir,
     finalFilePath: path.join(sessionDir, safeName),
+    sourceFilePath: path.join(sessionDir, "source.torrent"),
     stateFilePath: path.join(sessionDir, "state.json"),
     metadataFilePath: path.join(sessionDir, "metadata.json"),
   };
 };
+
+const resumableSessionsFilePath = () => path.join(getStorageRootDir(), "resumable-sessions.json");
 
 export const ensureSessionStorage = (paths: SessionStoragePaths) => {
   fs.mkdirSync(paths.rootDir, { recursive: true });
@@ -94,6 +103,183 @@ export const writeJsonSafely = (filePath: string, value: unknown) => {
         // Busy wait in sync path by design (short and bounded).
       }
     }
+  }
+};
+
+const normalizeResumableStatus = (value: unknown): ResumableSessionRecord["status"] | null => {
+  if (value === "starting") return "starting";
+  if (value === "running") return "running";
+  if (value === "paused") return "paused";
+  return null;
+};
+
+const normalizeSelectedFileIndices = (value: unknown): number[] | undefined => {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = Array.from(
+    new Set(
+      value
+        .map((candidate) => Number(candidate))
+        .filter((candidate) => Number.isInteger(candidate) && candidate >= 0)
+    )
+  );
+
+  return normalized.length > 0 ? normalized : undefined;
+};
+
+const normalizeResumableRecord = (value: unknown): ResumableSessionRecord | null => {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const raw = value as {
+    sessionId?: unknown;
+    userId?: unknown;
+    fileName?: unknown;
+    sourceType?: unknown;
+    magnetUri?: unknown;
+    torrentFilePath?: unknown;
+    selectedFileIndices?: unknown;
+    status?: unknown;
+    seeding?: unknown;
+    createdAt?: unknown;
+    updatedAt?: unknown;
+  };
+
+  if (typeof raw.sessionId !== "string" || raw.sessionId.trim().length === 0) {
+    return null;
+  }
+
+  const status = normalizeResumableStatus(raw.status);
+  if (!status) {
+    return null;
+  }
+
+  const sourceType = raw.sourceType === "magnet" ? "magnet" : raw.sourceType === "torrent-file" ? "torrent-file" : null;
+  if (!sourceType) {
+    return null;
+  }
+
+  const fileName = typeof raw.fileName === "string" && raw.fileName.trim().length > 0 ? raw.fileName : raw.sessionId;
+  const createdAt = typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now();
+  const updatedAt = typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt) ? raw.updatedAt : createdAt;
+
+  const normalized: ResumableSessionRecord = {
+    sessionId: raw.sessionId,
+    userId: typeof raw.userId === "string" && raw.userId.trim().length > 0 ? raw.userId : undefined,
+    fileName,
+    sourceType,
+    magnetUri: typeof raw.magnetUri === "string" && raw.magnetUri.trim().length > 0 ? raw.magnetUri : undefined,
+    torrentFilePath:
+      typeof raw.torrentFilePath === "string" && raw.torrentFilePath.trim().length > 0
+        ? raw.torrentFilePath
+        : undefined,
+    selectedFileIndices: normalizeSelectedFileIndices(raw.selectedFileIndices),
+    status,
+    seeding: raw.seeding === true,
+    createdAt,
+    updatedAt,
+  };
+
+  if (normalized.sourceType === "magnet" && !normalized.magnetUri) {
+    return null;
+  }
+
+  if (normalized.sourceType === "torrent-file" && !normalized.torrentFilePath) {
+    return null;
+  }
+
+  return normalized;
+};
+
+const readResumableSessionsUnsafe = (): ResumableSessionRecord[] => {
+  const indexPath = resumableSessionsFilePath();
+  if (!fs.existsSync(indexPath)) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(indexPath, "utf8")) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((record) => normalizeResumableRecord(record))
+      .filter((record): record is ResumableSessionRecord => record !== null)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+  } catch {
+    return [];
+  }
+};
+
+const writeResumableSessionsUnsafe = (records: ResumableSessionRecord[]) => {
+  const indexPath = resumableSessionsFilePath();
+  fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+  writeJsonSafely(
+    indexPath,
+    records.slice().sort((a, b) => b.updatedAt - a.updatedAt)
+  );
+};
+
+export const listResumableSessions = (): ResumableSessionRecord[] => readResumableSessionsUnsafe();
+
+export const upsertResumableSession = (record: ResumableSessionRecord) => {
+  const normalized = normalizeResumableRecord(record);
+  if (!normalized) {
+    return;
+  }
+
+  const current = readResumableSessionsUnsafe();
+  const byId = new Map(current.map((entry) => [entry.sessionId, entry]));
+  byId.set(normalized.sessionId, normalized);
+
+  writeResumableSessionsUnsafe(Array.from(byId.values()));
+};
+
+export const removeResumableSession = (sessionId: string) => {
+  const current = readResumableSessionsUnsafe();
+  const next = current.filter((record) => record.sessionId !== sessionId);
+
+  if (next.length === current.length) {
+    return;
+  }
+
+  writeResumableSessionsUnsafe(next);
+};
+
+export const persistSessionSourceTorrent = (sessionId: string, fileName: string, source: Buffer): string => {
+  const paths = getSessionStoragePaths(sessionId, fileName);
+  ensureSessionStorage(paths);
+  fs.writeFileSync(paths.sourceFilePath, source);
+  return paths.sourceFilePath;
+};
+
+export const loadSessionSourceTorrent = (sourceFilePath: string): Buffer | null => {
+  if (!sourceFilePath || !fs.existsSync(sourceFilePath)) {
+    return null;
+  }
+
+  try {
+    return fs.readFileSync(sourceFilePath);
+  } catch {
+    return null;
+  }
+};
+
+export const deleteSessionStorage = (sessionId: string): boolean => {
+  const paths = getSessionStoragePaths(sessionId);
+  if (!fs.existsSync(paths.sessionDir)) {
+    return false;
+  }
+
+  try {
+    fs.rmSync(paths.sessionDir, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
   }
 };
 

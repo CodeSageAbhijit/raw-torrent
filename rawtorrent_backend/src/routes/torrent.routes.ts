@@ -17,7 +17,9 @@ import {
   pauseTorrent,
   resumeTorrent,
   stopTorrent,
+  deleteTorrentSession,
   getTorrentStatus,
+  reannounceTorrentDiscovery,
   setSeedingEnabled,
 } from "../services/torrentService";
 import { getGlobalSettings, setGlobalSettings } from "../settings";
@@ -70,7 +72,6 @@ router.post("/settings", (req, res) => {
   try {
     const body = req.body ?? {};
     const updatedSettings = setGlobalSettings(body);
-    console.log("[Backend Settings Updated] Applied immediately to new downloads");
     res.json({
       success: true,
       data: updatedSettings,
@@ -83,34 +84,51 @@ router.post("/settings", (req, res) => {
 });
 
 router.post("/start", upload.single("torrentFile"), async (req, res, next) => {
-  console.log("========== NEW TORRENT UPLOAD REQUEST ==========");
-  console.log("[Route] User ID:", "local-user");
-  console.log("[Route] Uploaded File Name:", req.file?.originalname);
-  console.log("[Route] File bytes received:", req.file?.size || req.file?.buffer?.length || 0);
-
   try {
     const { magnetUri, sessionId, selectedFileIndices } = req.body ?? {};
     const fileBuffer = req.file?.buffer;
     const fileName = req.file?.originalname;
 
+    const normalizeSelectedIndices = (value: unknown): number[] | undefined => {
+      const parseArray = (source: unknown[]) => {
+        const normalized = source
+          .map((item) => Number(item))
+          .filter((item) => Number.isInteger(item) && item >= 0);
+        return normalized.length > 0 ? normalized : undefined;
+      };
+
+      if (Array.isArray(value)) {
+        return parseArray(value);
+      }
+
+      if (typeof value === "string" && value.trim().length > 0) {
+        try {
+          const parsed = JSON.parse(value) as unknown;
+          if (Array.isArray(parsed)) {
+            return parseArray(parsed);
+          }
+        } catch {
+          const split = value.split(",").map((part) => part.trim()).filter(Boolean);
+          return parseArray(split);
+        }
+      }
+
+      return undefined;
+    };
+
     if (!magnetUri && !fileBuffer) {
-      console.warn("[Route] Error: Missing magnetUri or torrentFile");
       res.status(400).json({ success: false, error: "Provide magnetUri or a torrentFile upload" });
       return;
     }
 
-    console.log("[Route] Passing to startTorrent service...");
     const result = await startTorrent({
       input: fileBuffer,
       magnetUri,
       fileName,
       sessionId,
       userId: "local-user",
-      selectedFileIndices: Array.isArray(selectedFileIndices) 
-        ? selectedFileIndices.map((idx: any) => Number(idx)).filter((idx) => !isNaN(idx))
-        : undefined,
+      selectedFileIndices: normalizeSelectedIndices(selectedFileIndices),
     });
-    console.log("[Route] Successfully started torrent session:", result.session.sessionId);
 
     res.status(202).json({
       success: true,
@@ -486,6 +504,31 @@ router.post("/sessions/:sessionId/stop", async (req, res, next) => {
   }
 });
 
+// Delete a torrent session and remove related files from disk
+router.delete("/sessions/:sessionId", async (req, res, next) => {
+  try {
+    const sessionId = String(req.params.sessionId);
+
+    if (false) {
+      res.status(403).json({ success: false, error: "Forbidden" });
+      return;
+    }
+
+    const result = await deleteTorrentSession(sessionId);
+
+    res.json({
+      success: true,
+      message:
+        result.removedSession || result.removedFiles
+          ? "Torrent session and files deleted"
+          : "Session already removed",
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Get torrent status
 router.get("/sessions/:sessionId/status", async (req, res, next) => {
   try {
@@ -551,6 +594,41 @@ router.post("/sessions/:sessionId/seeding", async (req, res, next) => {
         currentStatus: session.status
       });
     }
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Force immediate tracker reannounce (useful when peer discovery is slow)
+router.post("/sessions/:sessionId/reannounce", async (req, res, next) => {
+  try {
+    const sessionId = String(req.params.sessionId);
+    const session = await getTorrentSession(sessionId);
+
+    if (!session) {
+      res.status(404).json({ success: false, error: "Session not found" });
+      return;
+    }
+
+    if (false) {
+      res.status(403).json({ success: false, error: "Forbidden" });
+      return;
+    }
+
+    const success = await reannounceTorrentDiscovery(sessionId);
+
+    if (!success) {
+      res.status(400).json({
+        success: false,
+        error: "Unable to refresh tracker discovery for this session",
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: "Tracker discovery refresh triggered",
+    });
   } catch (error) {
     next(error);
   }

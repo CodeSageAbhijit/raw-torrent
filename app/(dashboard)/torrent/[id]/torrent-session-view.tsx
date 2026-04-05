@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import PieceGrid from "@/components/piece-grid";
 import PeerGraph, { type GraphPeer } from "@/components/peer-graph";
 import { BackendEvent, getBackendHttpUrl, getBackendWsUrl } from "@/lib/backend";
+import { upsertCachedSession } from "@/lib/session-cache";
 
 type SessionPayload = {
   sessionId: string;
@@ -84,6 +85,13 @@ const IMPORTANT_EVENT_TYPES = new Set([
 ]);
 
 const STAGE_LABELS = ["discovered", "handshake", "unchoked", "requesting", "verified"] as const;
+
+const peerAddressKey = (peer: Pick<PeerDownloadState, "ip" | "port">) => `${peer.ip}:${peer.port}`;
+
+const peerSelectionKey = (peer: Pick<PeerDownloadState, "ip" | "port">) => peerAddressKey(peer);
+
+const peerDisplayLabel = (peer: Pick<PeerDownloadState, "ip" | "port" | "peerId">) =>
+  peer.peerId ? `${peer.peerId} (${peer.ip}:${peer.port})` : peerAddressKey(peer);
 
 const resolvePeerStage = (
   peer: PeerDownloadState,
@@ -221,6 +229,31 @@ const formatBytes = (bytes: number): string => {
   return `${size.toFixed(1)} ${units[unit]}`;
 };
 
+const formatMegabytes = (bytes: number): string => {
+  const safeBytes = Number.isFinite(bytes) ? Math.max(0, bytes) : 0;
+  const mb = safeBytes / (1024 * 1024);
+  return `${mb.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} MB`;
+};
+
+const formatEtaLabel = (etaSeconds: number, isComplete: boolean): string => {
+  if (isComplete) return "done";
+  if (!Number.isFinite(etaSeconds) || etaSeconds < 0) return "calculating...";
+
+  if (etaSeconds < 60) {
+    return `${Math.max(1, Math.round(etaSeconds))}s`;
+  }
+
+  if (etaSeconds < 3600) {
+    const mins = Math.floor(etaSeconds / 60);
+    const secs = Math.floor(etaSeconds % 60);
+    return `${mins}m ${secs}s`;
+  }
+
+  const hours = Math.floor(etaSeconds / 3600);
+  const mins = Math.floor((etaSeconds % 3600) / 60);
+  return `${hours}h ${mins}m`;
+};
+
 const formatTime = (timestamp: number) =>
   new Date(timestamp).toLocaleTimeString("en-US", { hour12: false });
 
@@ -326,6 +359,7 @@ export default function TorrentSessionView({
   const [isSeeding, setIsSeeding] = useState(false);
   const [showSeedingModal, setShowSeedingModal] = useState(false);
   const [isSeedingTogglePending, setIsSeedingTogglePending] = useState(false);
+  const [isReannouncePending, setIsReannouncePending] = useState(false);
   const blockBatchRef = useRef<{ blocks: number; bytes: number; peers: Set<string> }>({
     blocks: 0,
     bytes: 0,
@@ -517,6 +551,8 @@ export default function TorrentSessionView({
   }, [authToken, session, downloadProgress?.progress, peerStates.length, hasAutoSwitchedSession, router]);
 
   useEffect(() => {
+    if (!authToken) return;
+
     const socket = new WebSocket(`${getBackendWsUrl()}/ws`);
 
     const flushBatch = () => {
@@ -613,21 +649,42 @@ export default function TorrentSessionView({
     return () => {
       clearInterval(batchTimer);
       flushBatch();
+
+      // In React dev lifecycle, teardown can happen before the handshake finishes.
+      // Avoid closing while CONNECTING to prevent noisy browser errors.
+      if (socket.readyState === WebSocket.CONNECTING) {
+        socket.addEventListener(
+          "open",
+          () => {
+            socket.close();
+          },
+          { once: true }
+        );
+        return;
+      }
+
       socket.close();
     };
-  }, [sessionId, fetchPeers, fetchPieces, pushEventLine]);
+  }, [authToken, sessionId, fetchPeers, fetchPieces, pushEventLine]);
 
   const isRunning = session?.status === "running";
   const progress = downloadProgress?.progress ?? session?.progress ?? 0;
   const isComplete = session?.status === "completed" || progress >= 99.9;
-  const hasDownloadStarted =
-    (downloadProgress?.downloadedBytes ?? 0) > 0 ||
-    (downloadProgress?.activePeers ?? 0) > 0 ||
-    peerStates.some((peer) => peer.downloadedBytes > 0 || peer.pendingRequests > 0) ||
-    (session?.progress ?? 0) > 0;
-  const isInitialLoading = !isSessionHydrated || !isMetricsHydrated || (!isComplete && !hasDownloadStarted);
+  const isInitialLoading = !isSessionHydrated || !isMetricsHydrated || (!session && !error);
+  const noPeersDetected =
+    !isInitialLoading &&
+    !isComplete &&
+    progress <= 0.1 &&
+    (downloadProgress?.activePeers ?? 0) === 0;
   const fileName = session?.fileName ?? `Session ${sessionId}`;
   const pieceTotal = downloadProgress?.piecesTotal ?? session?.pieceCount ?? pieces.length;
+  const totalBytes = downloadProgress?.totalBytes ?? 0;
+  const downloadedBytes =
+    downloadProgress?.downloadedBytes ??
+    (totalBytes > 0 ? Math.round((Math.max(0, Math.min(100, progress)) / 100) * totalBytes) : 0);
+  const completedMbLabel = formatMegabytes(downloadedBytes);
+  const totalMbLabel = totalBytes > 0 ? formatMegabytes(totalBytes) : "-- MB";
+  const etaLabel = formatEtaLabel(downloadProgress?.eta ?? -1, isComplete);
 
   const mappedPeers = useMemo<PeerDownloadState[]>(() => {
     if (peerStates.length > 0) return peerStates;
@@ -646,23 +703,68 @@ export default function TorrentSessionView({
     );
   }, [peerStates, session?.peers]);
 
+  const uniquePeers = useMemo<PeerDownloadState[]>(() => {
+    const byAddress = new Map<string, PeerDownloadState>();
+
+    for (const peer of mappedPeers) {
+      const key = peerAddressKey(peer);
+      const existing = byAddress.get(key);
+
+      if (!existing) {
+        byAddress.set(key, peer);
+        continue;
+      }
+
+      byAddress.set(key, {
+        ...existing,
+        peerId: existing.peerId ?? peer.peerId,
+        choked: existing.choked && peer.choked,
+        piecesAvailable: Math.max(existing.piecesAvailable, peer.piecesAvailable),
+        piecesAvailableKnown: existing.piecesAvailableKnown || peer.piecesAvailableKnown,
+        downloadedBytes: Math.max(existing.downloadedBytes, peer.downloadedBytes),
+        pendingRequests: Math.max(existing.pendingRequests, peer.pendingRequests),
+        encryption: existing.encryption !== "unknown" ? existing.encryption : peer.encryption,
+      });
+    }
+
+    return Array.from(byAddress.values());
+  }, [mappedPeers]);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
+    upsertCachedSession({
+      sessionId: session.sessionId,
+      fileName: session.fileName ?? `Session ${session.sessionId}`,
+      status: session.status,
+      progress,
+      peers: uniquePeers.slice(0, 120).map((peer) => ({
+        ip: peer.ip,
+        port: peer.port,
+        peerId: peer.peerId,
+      })),
+    });
+  }, [session, progress, uniquePeers]);
+
   const trackers = useMemo(() => {
     if (!session?.trackerUrl) return 0;
     return session.trackerUrl.split(",").filter((item) => item.trim().length > 0).length;
   }, [session?.trackerUrl]);
 
   const health = useMemo(() => {
-    const active = mappedPeers.filter((peer) => !peer.choked).length;
-    const choked = mappedPeers.length - active;
+    const active = uniquePeers.filter((peer) => !peer.choked).length;
+    const choked = uniquePeers.length - active;
     return { active, choked };
-  }, [mappedPeers]);
+  }, [uniquePeers]);
 
   const swarmPressure = useMemo(() => {
-    const pending = mappedPeers.reduce((sum, peer) => sum + peer.pendingRequests, 0);
-    const avgPending = mappedPeers.length ? pending / mappedPeers.length : 0;
-    const activeWithRequests = mappedPeers.filter((peer) => peer.pendingRequests > 0).length;
+    const pending = uniquePeers.reduce((sum, peer) => sum + peer.pendingRequests, 0);
+    const avgPending = uniquePeers.length ? pending / uniquePeers.length : 0;
+    const activeWithRequests = uniquePeers.filter((peer) => peer.pendingRequests > 0).length;
     return { pending, avgPending, activeWithRequests };
-  }, [mappedPeers]);
+  }, [uniquePeers]);
 
   const recentByPeer = useMemo(() => {
     const recent = eventLines.slice(-240);
@@ -681,13 +783,14 @@ export default function TorrentSessionView({
   }, [eventLines]);
 
   const graphPeers = useMemo<GraphPeer[]>(() => {
-    return mappedPeers.slice(0, 120).map((peer) => {
-      const key = peer.peerId ?? `${peer.ip}:${peer.port}`;
+    return uniquePeers.slice(0, 120).map((peer) => {
+      const addressKey = peerAddressKey(peer);
+      const eventStage = (peer.peerId ? recentByPeer.get(peer.peerId) : undefined) ?? recentByPeer.get(addressKey);
       const activity = Math.min(1, (peer.pendingRequests + peer.piecesAvailable / 64 + (peer.downloadedBytes > 0 ? 1 : 0)) / 6);
-      const stage = resolvePeerStage(peer, recentByPeer.get(key));
+      const stage = resolvePeerStage(peer, eventStage);
       return {
-        id: key,
-        label: key,
+        id: peerSelectionKey(peer),
+        label: peerDisplayLabel(peer),
         stage,
         activity,
         downloadLabel: `${formatBytes(peer.downloadedBytes)}`,
@@ -696,11 +799,11 @@ export default function TorrentSessionView({
         piecesAvailable: peer.piecesAvailable,
       };
     });
-  }, [mappedPeers, recentByPeer]);
+  }, [uniquePeers, recentByPeer]);
 
   const peersTable = useMemo(
-    () => [...mappedPeers].sort((a, b) => b.downloadedBytes - a.downloadedBytes),
-    [mappedPeers]
+    () => [...uniquePeers].sort((a, b) => b.downloadedBytes - a.downloadedBytes),
+    [uniquePeers]
   );
 
   const topPeers = useMemo(() => peersTable.slice(0, 24), [peersTable]);
@@ -711,13 +814,13 @@ export default function TorrentSessionView({
   );
 
   const activeRequestPeers = useMemo(
-    () => mappedPeers.filter((peer) => peer.pendingRequests > 0).length,
-    [mappedPeers]
+    () => uniquePeers.filter((peer) => peer.pendingRequests > 0).length,
+    [uniquePeers]
   );
 
   const totalDownloadedByPeers = useMemo(
-    () => mappedPeers.reduce((sum, peer) => sum + peer.downloadedBytes, 0),
-    [mappedPeers]
+    () => uniquePeers.reduce((sum, peer) => sum + peer.downloadedBytes, 0),
+    [uniquePeers]
   );
 
   const topContributors = useMemo(
@@ -736,14 +839,14 @@ export default function TorrentSessionView({
       return;
     }
 
-    if (!selectedPeerId || !peersTable.some((peer) => (peer.peerId ?? `${peer.ip}:${peer.port}`) === selectedPeerId)) {
-      setSelectedPeerId(topPeers[0].peerId ?? `${topPeers[0].ip}:${topPeers[0].port}`);
+    if (!selectedPeerId || !peersTable.some((peer) => peerSelectionKey(peer) === selectedPeerId)) {
+      setSelectedPeerId(peerSelectionKey(topPeers[0]));
     }
   }, [topPeers, peersTable, selectedPeerId]);
 
   const selectedPeer = useMemo(() => {
     if (!selectedPeerId) return null;
-    return peersTable.find((peer) => (peer.peerId ?? `${peer.ip}:${peer.port}`) === selectedPeerId) ?? null;
+    return peersTable.find((peer) => peerSelectionKey(peer) === selectedPeerId) ?? null;
   }, [peersTable, selectedPeerId]);
 
   const phaseSummary = useMemo(() => {
@@ -885,6 +988,47 @@ export default function TorrentSessionView({
     }
   };
 
+  const handleReannounceTrackers = async () => {
+    if (!authToken || !session || isReannouncePending) {
+      return;
+    }
+
+    setIsReannouncePending(true);
+
+    try {
+      const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions/${sessionId}/reannounce`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+
+      const payload = (await response.json()) as {
+        success: boolean;
+        error?: string;
+      };
+
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error ?? "Unable to refresh tracker discovery");
+      }
+
+      pushEventLine({
+        id: `reannounce-${Date.now()}`,
+        timestamp: Date.now(),
+        type: "tracker_reannounce",
+        phase: "discovery",
+        level: "normal",
+        summary: "Tracker refresh triggered. Looking for peers again.",
+      });
+
+      void fetchPeers();
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to refresh tracker discovery");
+    } finally {
+      setIsReannouncePending(false);
+    }
+  };
+
   useEffect(() => {
     if (!isComplete || completionNotified) return;
     setCompletionNotified(true);
@@ -982,6 +1126,26 @@ export default function TorrentSessionView({
 
         {error && <p className="text-sm text-destructive font-medium">{error}</p>}
 
+        {noPeersDetected && (
+          <section className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 animate-fade-in-up">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">No peers discovered yet</p>
+                <p className="text-xs font-mono text-foreground/65 mt-1">
+                  Download starts only after peers are found. This can happen with slow trackers or network DNS timeouts.
+                </p>
+              </div>
+              <button
+                onClick={handleReannounceTrackers}
+                disabled={isReannouncePending}
+                className="rounded-md border border-amber-500/50 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-500/15 disabled:opacity-60 dark:text-amber-300"
+              >
+                {isReannouncePending ? "Refreshing trackers..." : "Retry Peer Discovery"}
+              </button>
+            </div>
+          </section>
+        )}
+
         {isInitialLoading ? (
           <InitialTorrentSkeleton />
         ) : (
@@ -1074,7 +1238,13 @@ export default function TorrentSessionView({
                   </div>
                 </button>
               </div>
-              <p className="text-xs font-mono font-medium text-foreground/50">{progress.toFixed(1)}% Completed</p>
+              <div className="text-right space-y-0.5">
+                <p className="text-xs font-mono font-medium text-foreground/50">{progress.toFixed(1)}% Completed</p>
+                <p className="text-[11px] font-mono text-foreground/55">
+                  {completedMbLabel} / {totalMbLabel}
+                </p>
+                <p className="text-[11px] font-mono text-foreground/55">ETA {etaLabel}</p>
+              </div>
             </div>
           </div>
         </section>
@@ -1129,13 +1299,13 @@ export default function TorrentSessionView({
               <div className="mb-2 text-[11px] font-mono text-foreground/60">Top data contributors</div>
               <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
                 {topContributors.map((peer) => {
-                  const peerId = peer.peerId ?? `${peer.ip}:${peer.port}`;
+                  const peerKey = peerSelectionKey(peer);
                   const sharePct = topContributors.length > 0 && topContributors[0].downloadedBytes > 0
                     ? Math.min(100, (peer.downloadedBytes / topContributors[0].downloadedBytes) * 100)
                     : 0;
 
                   return (
-                    <div key={peerId} className="rounded-lg border bg-background p-3">
+                    <div key={peerKey} className="rounded-lg border bg-background p-3">
                       <div className="flex items-center justify-between text-xs font-mono mb-2">
                         <span className="text-foreground/70 truncate max-w-[170px]">{peer.ip}:{peer.port}</span>
                         <span className="font-semibold text-primary">{formatBytes(peer.downloadedBytes)}</span>
@@ -1159,9 +1329,9 @@ export default function TorrentSessionView({
                   <div className="pt-2">
                     <div className="mb-2 text-[11px] font-mono text-foreground/60">Request hotspots</div>
                     {requestHotspots.map((peer) => {
-                      const peerId = peer.peerId ?? `${peer.ip}:${peer.port}`;
+                      const peerKey = peerSelectionKey(peer);
                       return (
-                        <div key={`req-${peerId}`} className="text-[11px] font-mono text-foreground/70 flex items-center justify-between py-1">
+                        <div key={`req-${peerKey}`} className="text-[11px] font-mono text-foreground/70 flex items-center justify-between py-1">
                           <span className="truncate max-w-[190px]">{peer.ip}:{peer.port}</span>
                           <span className="text-accent font-semibold">{peer.pendingRequests} req</span>
                         </div>
@@ -1191,9 +1361,9 @@ export default function TorrentSessionView({
                   className="rounded-md border bg-background px-2 py-1 text-xs font-mono"
                 >
                   {peersTable.map((peer) => {
-                    const peerId = peer.peerId ?? `${peer.ip}:${peer.port}`;
+                    const peerKey = peerSelectionKey(peer);
                     return (
-                      <option key={peerId} value={peerId}>
+                      <option key={peerKey} value={peerKey}>
                         {peer.ip}:{peer.port}
                       </option>
                     );
@@ -1203,12 +1373,12 @@ export default function TorrentSessionView({
 
               <div className="grid grid-cols-2 gap-2">
                 {topPeers.slice(0, 12).map((peer) => {
-                  const peerId = peer.peerId ?? `${peer.ip}:${peer.port}`;
-                  const isSelected = selectedPeerId === peerId;
+                  const peerKey = peerSelectionKey(peer);
+                  const isSelected = selectedPeerId === peerKey;
                   return (
                     <button
-                      key={peerId}
-                      onClick={() => setSelectedPeerId(peerId)}
+                      key={peerKey}
+                      onClick={() => setSelectedPeerId(peerKey)}
                       className={`rounded-lg border px-3 py-2 text-left transition-colors ${
                         isSelected ? "border-primary bg-primary/10" : "hover:bg-secondary/30"
                       }`}
@@ -1221,20 +1391,22 @@ export default function TorrentSessionView({
               </div>
 
               {selectedPeer && (() => {
-                const peerId = selectedPeer.peerId ?? `${selectedPeer.ip}:${selectedPeer.port}`;
+                const peerRouteId = selectedPeer.peerId ?? peerAddressKey(selectedPeer);
                 const ownedPct = selectedPeer.piecesAvailableKnown && pieceTotal > 0
                   ? Math.min(100, (selectedPeer.piecesAvailable / pieceTotal) * 100)
                   : 0;
                 const fetchedPiecesEstimate = avgPieceBytes > 0
                   ? Math.min(pieceTotal, Math.floor(selectedPeer.downloadedBytes / avgPieceBytes))
                   : 0;
-                const stageLabel = STAGE_LABELS[Math.min(4, recentByPeer.get(peerId) ?? 0)];
+                const stageFromPeerId = selectedPeer.peerId ? recentByPeer.get(selectedPeer.peerId) : undefined;
+                const stageFromAddress = recentByPeer.get(peerAddressKey(selectedPeer));
+                const stageLabel = STAGE_LABELS[Math.min(4, stageFromPeerId ?? stageFromAddress ?? 0)];
 
                 return (
                   <div className="rounded-lg border bg-background p-3">
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-xs font-mono text-foreground/70">Peer Details</p>
-                      <Link href={`/peer/${peerId}`} className="text-xs font-semibold text-primary hover:underline">open</Link>
+                      <Link href={`/peer/${peerRouteId}`} className="text-xs font-semibold text-primary hover:underline">open</Link>
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-xs font-mono">
                       <div>

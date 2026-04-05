@@ -95,7 +95,7 @@ export default function PeerGraph({
 
         {nodes.map((node, index) => (
           <line
-            key={`edge-${node.id}`}
+            key={`edge-${node.id}-${index}`}
             x1={centerX}
             y1={centerY}
             x2={node.x}
@@ -128,9 +128,9 @@ export default function PeerGraph({
         <circle cx={centerX} cy={centerY} r="13" fill="hsl(var(--background))" stroke="hsl(var(--foreground))" strokeWidth="2" />
         <circle cx={centerX} cy={centerY} r="20" fill="none" stroke="hsl(var(--primary) / 0.5)" strokeDasharray="3 5" />
 
-        {nodes.map((node) => (
+        {nodes.map((node, index) => (
           <g
-            key={node.id}
+            key={`node-${node.id}-${index}`}
             onMouseEnter={() => setHoveredPeerId(node.id)}
             onMouseLeave={() => setHoveredPeerId("")}
             onClick={() => setSelectedPeerId((current) => (current === node.id ? "" : node.id))}

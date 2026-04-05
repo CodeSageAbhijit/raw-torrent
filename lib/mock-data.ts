@@ -76,7 +76,7 @@ export const peerSnapshots: PeerInfo[] = [
   {
     id: "peer-12f",
     ip: "45.22.119.10",
-    client: "qBittorrent/5.0",
+    client: "WebTorrent/2.8",
     pieces: 142,
     contribution: 22,
     downloadMbps: 3.2,

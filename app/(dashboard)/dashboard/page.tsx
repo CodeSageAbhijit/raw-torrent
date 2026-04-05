@@ -3,24 +3,118 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { BackendEvent, getBackendHttpUrl, getBackendWsUrl } from "@/lib/backend";
+import {
+  loadCachedSessions,
+  removeCachedSession,
+  upsertCachedSessions,
+  type SessionCacheRecord,
+} from "@/lib/session-cache";
 
 type BackendSession = {
   sessionId: string;
   fileName: string;
-  status: "idle" | "starting" | "running" | "paused" | "completed" | "error";
+  status: "idle" | "starting" | "running" | "paused" | "completed" | "error" | "stopped";
   progress: number;
   peers: Array<{ ip: string; port: number; peerId?: string }>;
+};
+
+const isActiveStatus = (status: BackendSession["status"]) => status === "running" || status === "starting";
+
+const sortSessions = (sessions: BackendSession[]) =>
+  sessions.slice().sort((a, b) => {
+    const aActive = isActiveStatus(a.status);
+    const bActive = isActiveStatus(b.status);
+
+    if (aActive !== bActive) {
+      return aActive ? -1 : 1;
+    }
+
+    if (a.progress !== b.progress) {
+      return b.progress - a.progress;
+    }
+
+    return a.sessionId.localeCompare(b.sessionId);
+  });
+
+const toBackendSession = (cached: SessionCacheRecord): BackendSession => ({
+  sessionId: cached.sessionId,
+  fileName: cached.fileName,
+  status: cached.status,
+  progress: cached.progress,
+  peers: cached.peers,
+});
+
+const mergeSessions = (preferred: BackendSession[], fallback: BackendSession[]) => {
+  const byId = new Map<string, BackendSession>();
+
+  for (const session of fallback) {
+    byId.set(session.sessionId, session);
+  }
+
+  for (const session of preferred) {
+    byId.set(session.sessionId, session);
+  }
+
+  return sortSessions(Array.from(byId.values()));
 };
 
 export default function DashboardPage() {
   const [sessions, setSessions] = useState<BackendSession[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [deletingSessionIds, setDeletingSessionIds] = useState<string[]>([]);
+
+  const isDeletingSession = (sessionId: string) => deletingSessionIds.includes(sessionId);
+
+  const handleDeleteSession = async (session: BackendSession) => {
+    if (isDeletingSession(session.sessionId)) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete "${session.fileName}" and remove all related files and session data?`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingSessionIds((current) => [...current, session.sessionId]);
+    setError(null);
+
+    try {
+      const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions/${session.sessionId}`, {
+        method: "DELETE",
+      });
+
+      const payload = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+      };
+
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error ?? "Failed to delete torrent session");
+      }
+
+      setSessions((current) => current.filter((item) => item.sessionId !== session.sessionId));
+      removeCachedSession(session.sessionId);
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Failed to delete torrent session");
+    } finally {
+      setDeletingSessionIds((current) => current.filter((id) => id !== session.sessionId));
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
 
     const load = async () => {
       setError(null);
+
+      const cachedSessions = loadCachedSessions().map(toBackendSession);
+      if (!cancelled && cachedSessions.length > 0) {
+        setSessions(cachedSessions);
+      }
+
       try {
         const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions`);
 
@@ -34,8 +128,53 @@ export default function DashboardPage() {
           throw new Error(payload.error ?? "Failed to load sessions");
         }
 
+        const liveSessions = payload.data;
+        let nextSessions = mergeSessions(liveSessions, cachedSessions);
+
+        if (cachedSessions.length > 0) {
+          const liveIds = new Set(liveSessions.map((session) => session.sessionId));
+          const missingIds = cachedSessions
+            .map((session) => session.sessionId)
+            .filter((sessionId) => !liveIds.has(sessionId))
+            .slice(0, 12);
+
+          if (missingIds.length > 0) {
+            const recovered = await Promise.all(
+              missingIds.map(async (sessionId) => {
+                try {
+                  const byIdResponse = await fetch(`${getBackendHttpUrl()}/torrent/sessions/${sessionId}`);
+                  if (!byIdResponse.ok) {
+                    return null;
+                  }
+
+                  const byIdPayload = (await byIdResponse.json()) as {
+                    success: boolean;
+                    data?: BackendSession;
+                  };
+
+                  if (!byIdPayload.success || !byIdPayload.data) {
+                    return null;
+                  }
+
+                  return byIdPayload.data;
+                } catch {
+                  return null;
+                }
+              })
+            );
+
+            nextSessions = mergeSessions(
+              recovered.filter((session): session is BackendSession => session !== null),
+              nextSessions
+            );
+          }
+        }
+
         if (!cancelled) {
-          setSessions(payload.data);
+          setSessions(nextSessions);
+          if (nextSessions.length > 0) {
+            upsertCachedSessions(nextSessions);
+          }
         }
       } catch (caughtError) {
         if (!cancelled) {
@@ -50,6 +189,14 @@ export default function DashboardPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (sessions.length === 0) {
+      return;
+    }
+
+    upsertCachedSessions(sessions);
+  }, [sessions]);
 
   useEffect(() => {
     const ws = new WebSocket(`${getBackendWsUrl()}/ws`);
@@ -142,12 +289,25 @@ export default function DashboardPage() {
     };
 
     return () => {
+      // In React dev lifecycle, teardown can happen before the handshake finishes.
+      // Avoid closing while CONNECTING to prevent noisy browser errors.
+      if (ws.readyState === WebSocket.CONNECTING) {
+        ws.addEventListener(
+          "open",
+          () => {
+            ws.close();
+          },
+          { once: true }
+        );
+        return;
+      }
+
       ws.close();
     };
   }, []);
 
   const summary = useMemo(() => {
-    const active = sessions.filter((session) => session.status === "running" || session.status === "starting").length;
+    const active = sessions.filter((session) => isActiveStatus(session.status)).length;
     const peers = sessions.reduce((sum, session) => sum + session.peers.length, 0);
     const completion = sessions.length
       ? Number((sessions.reduce((sum, session) => sum + session.progress, 0) / sessions.length).toFixed(1))
@@ -226,12 +386,22 @@ export default function DashboardPage() {
                   {sessions.map((session) => (
                     <tr key={session.sessionId} className="group hover:bg-secondary/40 transition-colors">
                       <td className="p-4">
-                        <Link
-                          href={`/torrent/${session.sessionId}`}
-                          className="hover:text-primary transition-colors font-medium hover:underline flex items-center gap-2"
-                        >
-                          {session.fileName}
-                        </Link>
+                        <div className="flex items-center justify-between gap-3">
+                          <Link
+                            href={`/torrent/${session.sessionId}`}
+                            className="hover:text-primary transition-colors font-medium hover:underline truncate"
+                          >
+                            {session.fileName}
+                          </Link>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteSession(session)}
+                            disabled={isDeletingSession(session.sessionId)}
+                            className="inline-flex items-center rounded-md border border-destructive/40 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isDeletingSession(session.sessionId) ? "Deleting..." : "Delete"}
+                          </button>
+                        </div>
                       </td>
                       <td className="p-4">
                         <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold tracking-widest uppercase bg-primary/10 text-primary border border-primary/20">

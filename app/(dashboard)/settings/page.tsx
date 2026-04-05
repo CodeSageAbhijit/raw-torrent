@@ -17,24 +17,28 @@ interface Settings {
   enableDHT: boolean;
   pieceSelectionStrategy: "sequential" | "random" | "rarest-first";
   peerConnectionTimeoutMs: number;
+  turboMode: boolean;
+  adaptiveTuning: boolean;
   extraTrackers: string[];
 }
 
-// Balanced defaults (moderate speed & stability)
+// High-speed stable defaults for long-running sessions.
 const DEFAULT_SETTINGS: Settings = {
   port: 6881,
-  maxPeers: 250,
-  downloadLimit: 0,
-  uploadLimit: 0,
-  maxRequestsPerPeer: 10,
-  requestTimeoutMs: 30000,
-  trackerAnnounceInterval: 60,
-  trackerNumwant: 500,
+  maxPeers: 120,
+  downloadLimit: 12288,
+  uploadLimit: 1024,
+  maxRequestsPerPeer: 20,
+  requestTimeoutMs: 20000,
+  trackerAnnounceInterval: 45,
+  trackerNumwant: 350,
   autoPickBestPeers: true,
   enablePEX: true,
   enableDHT: true,
   pieceSelectionStrategy: "rarest-first",
-  peerConnectionTimeoutMs: 15000,
+  peerConnectionTimeoutMs: 12000,
+  turboMode: true,
+  adaptiveTuning: true,
   extraTrackers: [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.stealth.si:80/announce",
@@ -44,21 +48,23 @@ const DEFAULT_SETTINGS: Settings = {
   ],
 };
 
-// Optimized for MAXIMUM DOWNLOAD SPEED
+// Extra-aggressive speed profile with stability guardrails.
 const SPEED_PRESET: Settings = {
   port: 6881,
-  maxPeers: 400, // Aggressive: connect to more peers
-  downloadLimit: 0,
-  uploadLimit: 0,
-  maxRequestsPerPeer: 25, // Request more pieces at once (aggressive pipelining)
-  requestTimeoutMs: 15000, // Shorter timeout to drop slow peers faster
-  trackerAnnounceInterval: 30, // Refresh peer list every 30s (more frequent discovery)
-  trackerNumwant: 500, // Request max peers from trackers
-  autoPickBestPeers: true, // Prioritize fastest peers
-  enablePEX: true, // Enable peer exchange for more sources
-  enableDHT: true, // Enable DHT for more peer discovery
-  pieceSelectionStrategy: "sequential", // Download sequentially (fastest start)
-  peerConnectionTimeoutMs: 10000, // Shorter timeout for faster connection failures
+  maxPeers: 160,
+  downloadLimit: 12288,
+  uploadLimit: 1536,
+  maxRequestsPerPeer: 24,
+  requestTimeoutMs: 17000,
+  trackerAnnounceInterval: 35,
+  trackerNumwant: 450,
+  autoPickBestPeers: true,
+  enablePEX: true,
+  enableDHT: true,
+  pieceSelectionStrategy: "sequential",
+  peerConnectionTimeoutMs: 10000,
+  turboMode: true,
+  adaptiveTuning: true,
   extraTrackers: [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.stealth.si:80/announce",
@@ -254,7 +260,7 @@ export default function SettingsPage() {
                 onChange={(e) => setSettings({ ...settings, maxPeers: Number(e.target.value) })}
                 className="flex h-9 w-full max-w-xs rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-sm transition-colors placeholder:text-foreground/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring md:text-sm"
               />
-              <p className="text-xs text-foreground/50">Maximum simultaneous peer connections (default: 250)</p>
+              <p className="text-xs text-foreground/50">Maximum simultaneous peer connections (default: 120)</p>
             </div>
 
             <div className="flex flex-col gap-2">
@@ -300,10 +306,10 @@ export default function SettingsPage() {
                 type="number"
                 value={settings.downloadLimit}
                 onChange={(e) => setSettings({ ...settings, downloadLimit: Number(e.target.value) })}
-                placeholder="0 = unlimited"
+                placeholder="12288"
                 className="flex h-9 w-full max-w-xs rounded-md border border-input bg-transparent px-3 py-1 text-base shadow-sm transition-colors placeholder:text-foreground/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring md:text-sm"
               />
-              <p className="text-xs text-foreground/50">Set to 0 for unlimited speed</p>
+              <p className="text-xs text-foreground/50">SSD Safety Guard enforces a backend hard cap even if this is set higher.</p>
             </div>
 
             <div className="flex flex-col gap-2">
@@ -487,6 +493,32 @@ export default function SettingsPage() {
                 Auto-select Best Peers (fastest peers prioritized)
               </label>
             </div>
+
+            <div className="flex items-center gap-3 py-2">
+              <input
+                id="turboMode"
+                type="checkbox"
+                checked={settings.turboMode}
+                onChange={(e) => setSettings({ ...settings, turboMode: e.target.checked })}
+                className="h-4 w-4 rounded border border-input"
+              />
+              <label htmlFor="turboMode" className="text-sm font-medium cursor-pointer">
+                Turbo Mode (disable non-essential analytics while downloading)
+              </label>
+            </div>
+
+            <div className="flex items-center gap-3 py-2">
+              <input
+                id="adaptiveTuning"
+                type="checkbox"
+                checked={settings.adaptiveTuning}
+                onChange={(e) => setSettings({ ...settings, adaptiveTuning: e.target.checked })}
+                className="h-4 w-4 rounded border border-input"
+              />
+              <label htmlFor="adaptiveTuning" className="text-sm font-medium cursor-pointer">
+                Adaptive Tuning (auto-adjust requests and strategy from live speed)
+              </label>
+            </div>
           </div>
         </div>
 
@@ -502,15 +534,15 @@ export default function SettingsPage() {
             <div className="rounded-md border border-blue-500/20 bg-blue-500/5 p-4">
               <div className="flex justify-between items-start gap-4">
                 <div>
-                  <h3 className="font-semibold text-blue-600">⚡ Maximum Speed</h3>
+                  <h3 className="font-semibold text-blue-600">⚡ High-Speed Stable</h3>
                   <p className="text-xs text-foreground/60 mt-1">
-                    For fastest downloads. Connects to 400 peers, requests 25 pieces/peer, frequent tracker updates.
+                    Faster profile tuned for long runs without overwhelming disk and memory.
                   </p>
                   <ul className="text-xs text-foreground/50 mt-2 space-y-0.5">
-                    <li>✓ Max Peers: 400 (vs 250)</li>
-                    <li>✓ Requests/Peer: 25 (vs 10)</li>
-                    <li>✓ Tracker Refresh: 30s (vs 60s)</li>
-                    <li>✓ Piece Strategy: Sequential</li>
+                    <li>✓ Max Peers: 160 (vs 120)</li>
+                    <li>✓ Requests/Peer: 24 (vs 20)</li>
+                    <li>✓ Tracker Refresh: 35s (vs 45s)</li>
+                    <li>✓ Upload cap: 1536 KB/s</li>
                   </ul>
                 </div>
                 <button
@@ -523,18 +555,18 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            {/* Balanced Preset */}
+            {/* Default Preset */}
             <div className="rounded-md border border-amber-500/20 bg-amber-500/5 p-4">
               <div className="flex justify-between items-start gap-4">
                 <div>
-                  <h3 className="font-semibold text-amber-600">⚖️ Balanced (Default)</h3>
+                  <h3 className="font-semibold text-amber-600">⚖️ Default Long-Run Stable</h3>
                   <p className="text-xs text-foreground/60 mt-1">
-                    Good balance between speed and resource usage. Moderate peer connections.
+                    Strong throughput with lower churn for 24/7 sessions.
                   </p>
                   <ul className="text-xs text-foreground/50 mt-2 space-y-0.5">
-                    <li>• Max Peers: 250</li>
-                    <li>• Requests/Peer: 10</li>
-                    <li>• Tracker Refresh: 60s</li>
+                    <li>• Max Peers: 120</li>
+                    <li>• Requests/Peer: 20</li>
+                    <li>• Tracker Refresh: 45s</li>
                     <li>• Piece Strategy: Rarest First</li>
                   </ul>
                 </div>

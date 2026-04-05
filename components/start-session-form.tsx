@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getBackendHttpUrl } from "@/lib/backend";
+import { upsertCachedSession } from "@/lib/session-cache";
 import { FileSelectionModal, type FileInfo } from "./file-selection-modal";
 
 export function StartSessionForm() {
@@ -142,6 +143,12 @@ export function StartSessionForm() {
         error?: string;
         data?: {
           sessionId: string;
+          session?: {
+            fileName?: string;
+            status?: "idle" | "starting" | "running" | "paused" | "completed" | "error";
+            progress?: number;
+            peers?: Array<{ ip: string; port: number; peerId?: string }>;
+          };
         };
       };
 
@@ -153,6 +160,22 @@ export function StartSessionForm() {
       if (!payload.success || !payload.data?.sessionId) {
         throw new Error(payload.error ?? "Failed to start backend torrent session");
       }
+
+      const backendSession = payload.data.session;
+      const fallbackName =
+        (torrentFile?.name && torrentFile.name.trim().length > 0 ? torrentFile.name : "") ||
+        (trimmedMagnet.length > 0 ? `${trimmedMagnet.slice(0, 56)}...` : payload.data.sessionId);
+
+      upsertCachedSession({
+        sessionId: payload.data.sessionId,
+        fileName:
+          backendSession?.fileName && backendSession.fileName.trim().length > 0 && backendSession.fileName !== "pending"
+            ? backendSession.fileName
+            : fallbackName,
+        status: backendSession?.status ?? "starting",
+        progress: backendSession?.progress ?? 0,
+        peers: backendSession?.peers ?? [],
+      });
 
       router.push(`/torrent/${payload.data.sessionId}`);
     } catch (caughtError) {

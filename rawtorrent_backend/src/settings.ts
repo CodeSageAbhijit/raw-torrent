@@ -15,24 +15,28 @@ export interface RuntimeSettings {
   enableDHT: boolean;
   pieceSelectionStrategy: "sequential" | "random" | "rarest-first";
   peerConnectionTimeoutMs: number;
+  turboMode: boolean;
+  adaptiveTuning: boolean;
   extraTrackers: string[];
 }
 
 // Default settings - optimized for good speed and stability
 export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   port: 6881,
-  maxPeers: 250,
-  downloadLimit: 0, // Unlimited
-  uploadLimit: 0, // Unlimited
-  maxRequestsPerPeer: 10,
-  requestTimeoutMs: 30000,
-  trackerAnnounceInterval: 60,
-  trackerNumwant: 500,
+  maxPeers: 120,
+  downloadLimit: 12288, // 12 MB/s default ceiling for SSD safety
+  uploadLimit: 1024, // 1 MB/s cap helps keep downloads stable over long runs
+  maxRequestsPerPeer: 20,
+  requestTimeoutMs: 20000,
+  trackerAnnounceInterval: 45,
+  trackerNumwant: 350,
   autoPickBestPeers: true,
   enablePEX: true,
   enableDHT: true,
   pieceSelectionStrategy: "rarest-first",
-  peerConnectionTimeoutMs: 15000,
+  peerConnectionTimeoutMs: 12000,
+  turboMode: true,
+  adaptiveTuning: true,
   extraTrackers: [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://tracker.openbittorrent.com:80/announce",
@@ -59,7 +63,12 @@ export function getGlobalSettings(): RuntimeSettings {
 }
 
 export function setGlobalSettings(settings: Partial<RuntimeSettings>): RuntimeSettings {
-  globalSettings = { ...globalSettings, ...settings };
+  const merged = {
+    ...globalSettings,
+    ...settings,
+  };
+
+  globalSettings = merged;
   return globalSettings;
 }
 
