@@ -1064,7 +1064,7 @@ export default function TorrentSessionView({
                   title={isSeeding ? "Seeding: ON - Click to disable" : "Seeding: OFF - Click to enable"}
                 >
                   <div className={`relative inline-flex h-4 w-7 items-center rounded-full transition-all ${
-                    isSeeding ? "bg-red-600" : "bg-secondary"
+                    isSeeding ? "bg-green-600" : "bg-secondary"
                   }`}>
                     <span
                       className={`inline-block h-3 w-3 transform rounded-full bg-background transition-transform ${
