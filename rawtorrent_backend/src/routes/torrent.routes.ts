@@ -7,6 +7,7 @@ import {
   getTorrentSession, 
   getUserSessions, 
   startTorrent,
+  parseTorrent,
   getDownloadProgress,
   getPieceStates,
   getPeerDownloadStates,
@@ -17,11 +18,69 @@ import {
   resumeTorrent,
   stopTorrent,
   getTorrentStatus,
+  setSeedingEnabled,
 } from "../services/torrentService";
+import { getGlobalSettings, setGlobalSettings } from "../settings";
 
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
+
+router.post("/parse", upload.single("torrentFile"), async (req, res, next) => {
+  try {
+    const { magnetUri } = req.body ?? {};
+    const fileBuffer = req.file?.buffer;
+    const fileName = req.file?.originalname;
+
+    if (!magnetUri && !fileBuffer) {
+      res.status(400).json({ success: false, error: "Provide magnetUri or a torrentFile upload" });
+      return;
+    }
+
+    const files = await parseTorrent({
+      input: fileBuffer,
+      magnetUri,
+      fileName,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        files,
+        isMultiFile: files.length > 1,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Settings endpoints
+router.get("/settings", (req, res) => {
+  try {
+    const settings = getGlobalSettings();
+    res.json({ success: true, data: settings });
+  } catch (error) {
+    console.error("Failed to get settings:", error);
+    res.status(500).json({ success: false, error: "Failed to get settings" });
+  }
+});
+
+router.post("/settings", (req, res) => {
+  try {
+    const body = req.body ?? {};
+    const updatedSettings = setGlobalSettings(body);
+    console.log("[Backend Settings Updated] Applied immediately to new downloads");
+    res.json({
+      success: true,
+      data: updatedSettings,
+      message: "Settings updated. New downloads will use these settings immediately.",
+    });
+  } catch (error) {
+    console.error("Failed to update settings:", error);
+    res.status(500).json({ success: false, error: "Failed to update settings" });
+  }
+});
 
 router.post("/start", upload.single("torrentFile"), async (req, res, next) => {
   console.log("========== NEW TORRENT UPLOAD REQUEST ==========");
@@ -30,7 +89,7 @@ router.post("/start", upload.single("torrentFile"), async (req, res, next) => {
   console.log("[Route] File bytes received:", req.file?.size || req.file?.buffer?.length || 0);
 
   try {
-    const { magnetUri, sessionId } = req.body ?? {};
+    const { magnetUri, sessionId, selectedFileIndices } = req.body ?? {};
     const fileBuffer = req.file?.buffer;
     const fileName = req.file?.originalname;
 
@@ -47,6 +106,9 @@ router.post("/start", upload.single("torrentFile"), async (req, res, next) => {
       fileName,
       sessionId,
       userId: "local-user",
+      selectedFileIndices: Array.isArray(selectedFileIndices) 
+        ? selectedFileIndices.map((idx: any) => Number(idx)).filter((idx) => !isNaN(idx))
+        : undefined,
     });
     console.log("[Route] Successfully started torrent session:", result.session.sessionId);
 
@@ -334,10 +396,11 @@ router.post("/sessions/:sessionId/pause", async (req, res, next) => {
     const success = await pauseTorrent(sessionId);
     
     if (success) {
+      const status = getTorrentStatus(sessionId);
       res.json({ 
         success: true, 
         message: "Torrent paused",
-        data: { status: "paused", progress: session.progress }
+        data: { status: "paused", progress: status?.progress ?? session.progress }
       });
     } else {
       res.status(400).json({ 
@@ -370,10 +433,11 @@ router.post("/sessions/:sessionId/resume", async (req, res, next) => {
     const success = await resumeTorrent(sessionId);
     
     if (success) {
+      const status = getTorrentStatus(sessionId);
       res.json({ 
         success: true, 
         message: "Torrent resumed",
-        data: { status: "running", progress: session.progress }
+        data: { status: "running", progress: status?.progress ?? session.progress }
       });
     } else {
       res.status(400).json({ 
@@ -450,6 +514,43 @@ router.get("/sessions/:sessionId/status", async (req, res, next) => {
         activePeerCount: 0,
       }
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Toggle seeding for a torrent
+router.post("/sessions/:sessionId/seeding", async (req, res, next) => {
+  try {
+    const sessionId = String(req.params.sessionId);
+    const { enabled } = req.body ?? {};
+    const session = await getTorrentSession(sessionId);
+
+    if (!session) {
+      res.status(404).json({ success: false, error: "Session not found" });
+      return;
+    }
+
+    if (false) {
+      res.status(403).json({ success: false, error: "Forbidden" });
+      return;
+    }
+
+    const success = await setSeedingEnabled(sessionId, enabled === true);
+    
+    if (success) {
+      res.json({ 
+        success: true, 
+        message: enabled ? "Seeding enabled" : "Seeding disabled",
+        data: { seeding: enabled }
+      });
+    } else {
+      res.status(400).json({ 
+        success: false, 
+        error: "Cannot change seeding status",
+        currentStatus: session.status
+      });
+    }
   } catch (error) {
     next(error);
   }

@@ -26,17 +26,30 @@ export async function HeaderDashboard() {
           </Link>
           {!isGuest && (
             <>
-              <Link href="/publish" className="text-foreground/60 hover:text-foreground transition-colors font-medium">
-                Publish
-              </Link>
               <Link href="/settings" className="text-foreground/60 hover:text-foreground transition-colors font-medium">
                 Settings
               </Link>
+              {/* TODO: Publish feature - TO BE IMPLEMENTED */}
+              {/* <Link href="/publish" className="text-foreground/60 hover:text-foreground transition-colors font-medium">
+                Publish
+              </Link> */}
             </>
           )}
           <div className="w-px h-4 bg-foreground/20 mx-1" />
-          <ThemeToggle />
           <LogoutButton />
+          <a
+            href="https://github.com/CodeSageAbhijit/rawtorrent"
+            target="_blank"
+            rel="noreferrer"
+            className="btn-outline-animate inline-flex h-9 w-9 items-center justify-center text-foreground/60 hover:text-yellow-500 border border-foreground/10 rounded-md hover:bg-foreground/5 animate-pulse-glow"
+            aria-label="Star rawtorrent on GitHub"
+            title="Star this repository"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z" />
+            </svg>
+          </a>
+          <ThemeToggle />
         </div>
       </div>
     </nav>

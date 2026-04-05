@@ -240,6 +240,76 @@ button:active {
   100% { background-position: 200% 0; }
 }
 
+@keyframes topologyDash {
+  0% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: -120;
+  }
+}
+
+.topology-line-animated {
+  animation: topologyDash 7s linear infinite;
+}
+
+.silver-shimmer {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(90deg, hsl(0 0% 86%), hsl(0 0% 89%), hsl(0 0% 86%));
+  background-size: 200% 100%;
+  animation: silverBase 3s ease-in-out infinite;
+}
+
+.silver-shimmer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    135deg,
+    transparent 0%,
+    hsla(0, 0%, 100%, 0.2) 15%,
+    hsla(0, 0%, 100%, 0.5) 50%,
+    hsla(0, 0%, 100%, 0.2) 85%,
+    transparent 100%
+  );
+  background-size: 200% 200%;
+  filter: blur(5px);
+  animation: shimmerShine 2s ease-in-out infinite;
+}
+
+.silver-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0px,
+    hsla(0, 0%, 100%, 0.03) 1px,
+    transparent 2px,
+    transparent 4px
+  );
+  pointer-events: none;
+}
+
+@keyframes silverBase {
+  0%, 100% {
+    background-position: 0% 0%;
+  }
+  50% {
+    background-position: 100% 0%;
+  }
+}
+
+@keyframes shimmerShine {
+  0% {
+    background-position: -200% 0%;
+  }
+  100% {
+    background-position: 200% 0%;
+  }
+}
+
 .progress-animated {
   position: relative;
   overflow: hidden;

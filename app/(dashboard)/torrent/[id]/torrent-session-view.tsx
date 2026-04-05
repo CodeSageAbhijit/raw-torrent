@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import PieceGrid from "@/components/piece-grid";
 import PeerGraph, { type GraphPeer } from "@/components/peer-graph";
@@ -44,8 +44,10 @@ type PeerDownloadState = {
   peerId?: string;
   choked: boolean;
   piecesAvailable: number;
+  piecesAvailableKnown: boolean;
   downloadedBytes: number;
   pendingRequests: number;
+  encryption: "unknown" | "plaintext" | "mse-rc4";
 };
 
 type EventPhase = "system" | "discovery" | "handshake" | "transfer" | "verification" | "error";
@@ -60,20 +62,45 @@ type EventLine = {
   peerKey?: string;
 };
 
+type ProtocolTag = "handshake" | "bitfield" | "interested" | "unchoke" | "request" | "piece" | "verify" | "have" | "error" | "info";
+
 const IMPORTANT_EVENT_TYPES = new Set([
   "torrent_started",
   "torrent_paused",
   "torrent_resumed",
   "torrent_completed",
   "torrent_error",
+  "peer_handshake",
+  "peer_bitfield",
+  "peer_interested",
   "peer_discovered",
   "peer_choked",
   "peer_unchoked",
+  "block_requested",
+  "piece_batch_received",
+  "peer_have_piece",
   "piece_verified",
   "piece_failed",
 ]);
 
 const STAGE_LABELS = ["discovered", "handshake", "unchoked", "requesting", "verified"] as const;
+
+const resolvePeerStage = (
+  peer: PeerDownloadState,
+  eventStage: number | undefined,
+): 0 | 1 | 2 | 3 | 4 => {
+  const fromEvents = typeof eventStage === "number" ? eventStage : -1;
+  const fromState =
+    peer.downloadedBytes > 0
+      ? 4
+      : peer.pendingRequests > 0
+        ? 3
+        : !peer.choked
+          ? 2
+          : 0;
+
+  return Math.min(4, Math.max(fromEvents, fromState)) as 0 | 1 | 2 | 3 | 4;
+};
 
 const toEventPhase = (type: string): EventPhase => {
   if (type.includes("error") || type.includes("failed")) return "error";
@@ -100,9 +127,32 @@ const resolvePeerKey = (event: BackendEvent): string | undefined => {
 const summarizeEvent = (event: BackendEvent): string => {
   const data = event.data as Record<string, unknown>;
   const pieces = typeof data.pieceIndex === "number" ? `piece #${data.pieceIndex}` : null;
+  const pieceIndex = typeof data.pieceIndex === "number" ? data.pieceIndex : null;
+  const offset = typeof data.offset === "number" ? data.offset : 0;
+  const length = typeof data.length === "number" ? data.length : 0;
+  const bytes = typeof data.bytes === "number" ? data.bytes : 0;
   const ip = typeof data.ip === "string" ? data.ip : null;
   const port = typeof data.port === "number" ? `:${data.port}` : "";
   const speed = typeof data.downloadSpeed === "number" ? `speed ${(data.downloadSpeed / 1024 / 1024).toFixed(2)} MB/s` : null;
+  const peerLabel = typeof data.peerLabel === "string" ? data.peerLabel : null;
+  const peer = peerLabel ?? (ip ? `${ip}${port}` : "peer");
+  const piecesAvailable = typeof data.piecesAvailable === "number" ? data.piecesAvailable : null;
+  const peers = typeof data.peers === "number" ? data.peers : null;
+
+  if (event.type === "peer_handshake") return `${peer} connected via TCP/${String(data.port ?? "?")}`;
+  if (event.type === "peer_bitfield" && piecesAvailable !== null) return `received ${piecesAvailable} pieces from ${peer}`;
+  if (event.type === "peer_interested") return `sent to ${peer}`;
+  if (event.type === "peer_unchoked") return `received from ${peer}`;
+  if (event.type === "block_requested" && pieceIndex !== null) return `piece idx=${pieceIndex} offset=${offset} len=${length}`;
+  if (event.type === "block_received") return `received ${bytes} bytes from ${peer}`;
+  if (event.type === "piece_batch_received") {
+    const blocks = typeof data.blocks === "number" ? data.blocks : 0;
+    const peersCount = typeof data.peers === "number" ? data.peers : 0;
+    const bytesCount = typeof data.bytes === "number" ? data.bytes : 0;
+    return `received ${blocks} blocks (${formatBytes(bytesCount)}) from ${peersCount} peers`;
+  }
+  if (event.type === "piece_verified" && pieceIndex !== null) return `sha1 hash OK for piece ${pieceIndex}`;
+  if (event.type === "peer_have_piece" && pieceIndex !== null) return `broadcast piece ${pieceIndex} to ${peers ?? "?"} peers`;
 
   if (event.type === "peer_discovered" && ip) return `Peer discovered ${ip}${port}`;
   if (event.type === "peer_unchoked" && ip) return `Peer unchoked ${ip}${port}`;
@@ -116,6 +166,35 @@ const summarizeEvent = (event: BackendEvent): string => {
     .map(([key, value]) => `${key}=${String(value)}`)
     .join(" ");
   return fields || event.type.replaceAll("_", " ");
+};
+
+const protocolTagForEvent = (line: EventLine): ProtocolTag => {
+  const type = line.type.toLowerCase();
+  const summary = line.summary.toLowerCase();
+
+  if (line.level === "error" || type.includes("error") || type.includes("failed")) return "error";
+  if (type.includes("handshake")) return "handshake";
+  if (type.includes("bitfield")) return "bitfield";
+  if (type.includes("interested")) return "interested";
+  if (type.includes("unchoke") || type.includes("choke")) return "unchoke";
+  if (type.includes("block_requested") || type.includes("piece_requested") || summary.includes("requested")) return "request";
+  if (type.includes("block_received") || summary.includes("received")) return "piece";
+  if (type.includes("piece_verified") || type.includes("verify") || summary.includes("verified")) return "verify";
+  if (type.includes("have") || type.includes("peer_has_piece")) return "have";
+  return "info";
+};
+
+const protocolTagClass: Record<ProtocolTag, string> = {
+  handshake: "text-primary",
+  bitfield: "text-accent",
+  interested: "text-foreground/80",
+  unchoke: "text-primary",
+  request: "text-orange-500",
+  piece: "text-foreground/80",
+  verify: "text-green-600",
+  have: "text-primary",
+  error: "text-destructive",
+  info: "text-foreground/70",
 };
 
 const formatSpeed = (bytesPerSecond: number): string => {
@@ -146,7 +225,7 @@ const formatTime = (timestamp: number) =>
   new Date(timestamp).toLocaleTimeString("en-US", { hour12: false });
 
 function LoadingBlock({ className }: { className: string }) {
-  return <div className={`rounded-lg bg-secondary/60 animate-pulse ${className}`} />;
+  return <div className={`rounded-lg silver-shimmer ${className}`} />;
 }
 
 function InitialTorrentSkeleton() {
@@ -222,7 +301,6 @@ export default function TorrentSessionView({
   sessionId: string;
 }) {
   const router = useRouter();
-
   const [session, setSession] = useState<SessionPayload | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
   const [peerStates, setPeerStates] = useState<PeerDownloadState[]>([]);
@@ -236,11 +314,39 @@ export default function TorrentSessionView({
   const [isSessionHydrated, setIsSessionHydrated] = useState(false);
   const [isMetricsHydrated, setIsMetricsHydrated] = useState(false);
   const [eventStreamPaused, setEventStreamPaused] = useState(false);
+  const [pausedEventLines, setPausedEventLines] = useState<EventLine[]>([]);
+  const [eventSearchText, setEventSearchText] = useState("");
+  const [eventPhaseFilter, setEventPhaseFilter] = useState<"all" | EventPhase>("all");
+  const [eventMode, setEventMode] = useState<"all" | "important" | "errors">("important");
+  const [eventViewMode, setEventViewMode] = useState<"timeline" | "log">("log");
+  const [eventLimit, setEventLimit] = useState(60);
+  const [selectedEventId, setSelectedEventId] = useState<string>("");
   const [selectedPeerId, setSelectedPeerId] = useState<string>("");
+  const [hasAutoSwitchedSession, setHasAutoSwitchedSession] = useState(false);
+  const [isSeeding, setIsSeeding] = useState(false);
+  const [showSeedingModal, setShowSeedingModal] = useState(false);
+  const [isSeedingTogglePending, setIsSeedingTogglePending] = useState(false);
+  const blockBatchRef = useRef<{ blocks: number; bytes: number; peers: Set<string> }>({
+    blocks: 0,
+    bytes: 0,
+    peers: new Set<string>(),
+  });
 
   const pushEventLine = useCallback((next: EventLine) => {
     setEventLines((current) => [...current, next].slice(-320));
   }, []);
+
+  const handleToggleEventStreamPause = useCallback(() => {
+    setEventStreamPaused((current) => {
+      if (current) {
+        setPausedEventLines([]);
+        return false;
+      }
+
+      setPausedEventLines(eventLines);
+      return true;
+    });
+  }, [eventLines]);
 
   useEffect(() => {
     setAuthToken("local-bypass");
@@ -363,12 +469,90 @@ export default function TorrentSessionView({
   }, [authToken, fetchProgress, fetchPeers, fetchPieces, hydrateInitialMetrics]);
 
   useEffect(() => {
+    if (!authToken || !session || hasAutoSwitchedSession) return;
+
+    const currentProgress = downloadProgress?.progress ?? session.progress ?? 0;
+    const noPeerActivity = peerStates.length === 0;
+    const looksStaleRunning = session.status === "running" && currentProgress <= 0.1 && noPeerActivity;
+    if (!looksStaleRunning) return;
+
+    let cancelled = false;
+
+    const trySwitchToActiveSibling = async () => {
+      try {
+        const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions`, {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (!response.ok) return;
+
+        const payload = (await response.json()) as { data?: Array<SessionPayload> };
+        const sessions = payload.data ?? [];
+
+        const sibling = sessions.find((candidate) => {
+          if (candidate.sessionId === session.sessionId) return false;
+          if (candidate.status !== "running") return false;
+
+          const sameTorrent =
+            (session.infoHash !== "pending" && candidate.infoHash === session.infoHash) ||
+            candidate.fileName === session.fileName;
+
+          return sameTorrent && candidate.progress > currentProgress + 0.5;
+        });
+
+        if (!cancelled && sibling) {
+          setHasAutoSwitchedSession(true);
+          setError(`Switched to active session ${sibling.sessionId}`);
+          router.replace(`/torrent/${sibling.sessionId}`);
+        }
+      } catch {
+        // no-op
+      }
+    };
+
+    void trySwitchToActiveSibling();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, session, downloadProgress?.progress, peerStates.length, hasAutoSwitchedSession, router]);
+
+  useEffect(() => {
     const socket = new WebSocket(`${getBackendWsUrl()}/ws`);
+
+    const flushBatch = () => {
+      const batch = blockBatchRef.current;
+      if (batch.blocks <= 0) return;
+
+      pushEventLine({
+        id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: Date.now(),
+        type: "piece_batch_received",
+        phase: "transfer",
+        level: "normal",
+        summary: `received ${batch.blocks} blocks (${formatBytes(batch.bytes)}) from ${batch.peers.size} peers`,
+      });
+
+      blockBatchRef.current = { blocks: 0, bytes: 0, peers: new Set<string>() };
+    };
+
+    const batchTimer = setInterval(flushBatch, 1400);
 
     socket.onmessage = (rawMessage) => {
       try {
         const event = JSON.parse(rawMessage.data as string) as BackendEvent;
         if (event.sessionId && event.sessionId !== sessionId) return;
+
+        if (event.type === "block_received") {
+          const data = event.data as { bytes?: number };
+          const peerKey = resolvePeerKey(event);
+
+          blockBatchRef.current.blocks += 1;
+          blockBatchRef.current.bytes += Number(data.bytes ?? 0);
+          if (peerKey) {
+            blockBatchRef.current.peers.add(peerKey);
+          }
+          return;
+        }
 
         pushEventLine({
           id: `${event.timestamp}-${event.type}-${Math.random().toString(36).slice(2, 7)}`,
@@ -426,13 +610,22 @@ export default function TorrentSessionView({
       });
     };
 
-    return () => socket.close();
+    return () => {
+      clearInterval(batchTimer);
+      flushBatch();
+      socket.close();
+    };
   }, [sessionId, fetchPeers, fetchPieces, pushEventLine]);
 
   const isRunning = session?.status === "running";
   const progress = downloadProgress?.progress ?? session?.progress ?? 0;
   const isComplete = session?.status === "completed" || progress >= 99.9;
-  const isInitialLoading = !isSessionHydrated || !isMetricsHydrated;
+  const hasDownloadStarted =
+    (downloadProgress?.downloadedBytes ?? 0) > 0 ||
+    (downloadProgress?.activePeers ?? 0) > 0 ||
+    peerStates.some((peer) => peer.downloadedBytes > 0 || peer.pendingRequests > 0) ||
+    (session?.progress ?? 0) > 0;
+  const isInitialLoading = !isSessionHydrated || !isMetricsHydrated || (!isComplete && !hasDownloadStarted);
   const fileName = session?.fileName ?? `Session ${sessionId}`;
   const pieceTotal = downloadProgress?.piecesTotal ?? session?.pieceCount ?? pieces.length;
 
@@ -445,8 +638,10 @@ export default function TorrentSessionView({
         peerId: peer.peerId,
         choked: false,
         piecesAvailable: 0,
+        piecesAvailableKnown: false,
         downloadedBytes: 0,
         pendingRequests: 0,
+        encryption: "unknown",
       })) ?? []
     );
   }, [peerStates, session?.peers]);
@@ -489,13 +684,16 @@ export default function TorrentSessionView({
     return mappedPeers.slice(0, 120).map((peer) => {
       const key = peer.peerId ?? `${peer.ip}:${peer.port}`;
       const activity = Math.min(1, (peer.pendingRequests + peer.piecesAvailable / 64 + (peer.downloadedBytes > 0 ? 1 : 0)) / 6);
+      const stage = resolvePeerStage(peer, recentByPeer.get(key));
       return {
         id: key,
         label: key,
-        stage: (recentByPeer.get(key) ?? 0) as 0 | 1 | 2 | 3 | 4,
+        stage,
         activity,
         downloadLabel: `${formatBytes(peer.downloadedBytes)}`,
         uploadLabel: `${peer.pendingRequests} req`,
+        pendingRequests: peer.pendingRequests,
+        piecesAvailable: peer.piecesAvailable,
       };
     });
   }, [mappedPeers, recentByPeer]);
@@ -506,6 +704,31 @@ export default function TorrentSessionView({
   );
 
   const topPeers = useMemo(() => peersTable.slice(0, 24), [peersTable]);
+
+  const verifiedPeers = useMemo(
+    () => graphPeers.filter((peer) => peer.stage >= 4).length,
+    [graphPeers]
+  );
+
+  const activeRequestPeers = useMemo(
+    () => mappedPeers.filter((peer) => peer.pendingRequests > 0).length,
+    [mappedPeers]
+  );
+
+  const totalDownloadedByPeers = useMemo(
+    () => mappedPeers.reduce((sum, peer) => sum + peer.downloadedBytes, 0),
+    [mappedPeers]
+  );
+
+  const topContributors = useMemo(
+    () => peersTable.filter((peer) => peer.downloadedBytes > 0).slice(0, 8),
+    [peersTable]
+  );
+
+  const requestHotspots = useMemo(
+    () => peersTable.filter((peer) => peer.pendingRequests > 0).slice(0, 6),
+    [peersTable]
+  );
 
   useEffect(() => {
     if (topPeers.length === 0) {
@@ -539,35 +762,43 @@ export default function TorrentSessionView({
   }, [eventLines]);
 
   const displayEvents = useMemo(() => {
-    const source = eventStreamPaused ? eventLines.slice(0, Math.max(0, eventLines.length - 1)) : eventLines;
+    const source = eventStreamPaused ? pausedEventLines : eventLines;
+    const query = eventSearchText.trim().toLowerCase();
     let verifiedCounter = 0;
+
     const filtered = source.filter((line) => {
-      if (!IMPORTANT_EVENT_TYPES.has(line.type)) return false;
-      if (line.type === "piece_verified") {
-        verifiedCounter += 1;
-        return verifiedCounter % 8 === 0;
+      if (eventMode === "important") {
+        if (!IMPORTANT_EVENT_TYPES.has(line.type)) return false;
+        if (line.type === "piece_verified") {
+          verifiedCounter += 1;
+          if (verifiedCounter % 6 !== 0) return false;
+        }
+      } else if (eventMode === "errors" && line.level !== "error") {
+        return false;
       }
-      return true;
+
+      if (eventPhaseFilter !== "all" && line.phase !== eventPhaseFilter) {
+        return false;
+      }
+
+      if (!query) return true;
+      const searchable = `${line.type} ${line.summary} ${line.phase} ${line.peerKey ?? ""}`.toLowerCase();
+      return searchable.includes(query);
     });
-    return filtered.slice(-80);
-  }, [eventLines, eventStreamPaused]);
+
+    return filtered.slice(-eventLimit);
+  }, [eventLines, pausedEventLines, eventStreamPaused, eventSearchText, eventPhaseFilter, eventMode, eventLimit]);
+
+  const selectedEvent = useMemo(
+    () => displayEvents.find((line) => line.id === selectedEventId) ?? null,
+    [displayEvents, selectedEventId]
+  );
 
   const avgPieceBytes = useMemo(() => {
     const totalBytes = downloadProgress?.totalBytes ?? 0;
     if (pieceTotal <= 0 || totalBytes <= 0) return 0;
     return totalBytes / pieceTotal;
   }, [downloadProgress?.totalBytes, pieceTotal]);
-
-  const encryptionStatus = useMemo(() => {
-    const signal = eventLines
-      .slice(-220)
-      .map((line) => `${line.type} ${line.summary}`.toLowerCase())
-      .join(" ");
-
-    if (signal.includes("rc4") || signal.includes("mse")) return "RC4/MSE observed";
-    if (signal.includes("plaintext")) return "Plaintext observed";
-    return "Unknown (backend does not expose per-peer encryption yet)";
-  }, [eventLines]);
 
   const handleTogglePauseResume = async () => {
     if (!authToken || !session || isControlPending || isComplete) {
@@ -600,6 +831,57 @@ export default function TorrentSessionView({
       setError(caughtError instanceof Error ? caughtError.message : `Unable to ${action} torrent`);
     } finally {
       setIsControlPending(false);
+    }
+  };
+
+  const handleToggleSeeding = async (confirmed: boolean = false) => {
+    if (!confirmed && !isSeeding) {
+      setShowSeedingModal(true);
+      return;
+    }
+
+    if (!authToken || !session || isSeedingTogglePending) {
+      return;
+    }
+
+    setIsSeedingTogglePending(true);
+    setShowSeedingModal(false);
+
+    const newSeedingState = !isSeeding;
+
+    try {
+      const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions/${sessionId}/seeding`, {
+        method: "POST",
+        headers: { 
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ enabled: newSeedingState }),
+      });
+
+      const payload = (await response.json()) as {
+        success: boolean;
+        error?: string;
+        data?: { seeding?: boolean };
+      };
+
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error ?? "Failed to toggle seeding");
+      }
+
+      setIsSeeding(newSeedingState);
+      pushEventLine({
+        id: `seeding-${newSeedingState ? "started" : "stopped"}-${Date.now()}`,
+        timestamp: Date.now(),
+        type: newSeedingState ? "torrent_seeding_started" : "torrent_seeding_stopped",
+        phase: "system",
+        level: "normal",
+        summary: newSeedingState ? "Seeding enabled. Contributing to the torrent swarm." : "Seeding disabled.",
+      });
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to toggle seeding");
+    } finally {
+      setIsSeedingTogglePending(false);
     }
   };
 
@@ -676,36 +958,7 @@ export default function TorrentSessionView({
               <span>ID: {sessionId}</span>
               <span className="w-1 h-1 rounded-full bg-foreground/20" />
               <span>{formatBytes(downloadProgress?.totalBytes ?? 0)}</span>
-              <span className="w-1 h-1 rounded-full bg-foreground/20" />
-              <span className="text-primary font-bold">Enc: {encryptionStatus}</span>
             </div>
-          </div>
-          <div className="flex gap-3">
-            {isComplete ? (
-              <button
-                onClick={handleDownloadCompletedFile}
-                disabled={isDownloadPending}
-                className="btn-animate rounded-lg bg-primary text-primary-foreground border-transparent border px-5 py-2.5 text-sm font-semibold transition-colors hover:opacity-90 disabled:opacity-60"
-              >
-                {isDownloadPending ? "Preparing file..." : "Download File"}
-              </button>
-            ) : (
-              <button
-                onClick={handleTogglePauseResume}
-                disabled={isControlPending}
-                className={`btn-animate rounded-lg border px-5 py-2.5 text-sm font-semibold transition-colors ${
-                  isRunning ? "hover:bg-secondary text-foreground" : "bg-primary text-primary-foreground border-transparent"
-                }`}
-              >
-                {isControlPending ? "Please wait..." : isRunning ? "Pause Stream" : "Resume"}
-              </button>
-            )}
-            <button
-              onClick={() => router.push("/dashboard")}
-              className="btn-animate rounded-lg bg-destructive/10 px-5 py-2.5 text-sm font-semibold text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors"
-            >
-              Drop
-            </button>
           </div>
         </header>
 
@@ -762,43 +1015,72 @@ export default function TorrentSessionView({
           <div className="col-span-3 rounded-xl border bg-card p-5 flex flex-col justify-center">
             <div className="flex justify-between items-end mb-2">
               <p className="text-xs font-bold text-foreground/50 uppercase tracking-wider font-mono">Real-time Transfer</p>
-              <div className="flex gap-4 text-sm font-mono font-medium">
+              <div className="flex items-center gap-3">
+                {!isComplete && (
+                  <button
+                    onClick={handleTogglePauseResume}
+                    disabled={isControlPending}
+                    aria-label={isControlPending ? "Applying torrent control" : isRunning ? "Pause torrent" : "Resume torrent"}
+                    title={isControlPending ? "Applying" : isRunning ? "Pause" : "Play"}
+                    className={`h-8 w-8 inline-flex items-center justify-center rounded-md border transition-colors ${
+                      isRunning ? "hover:bg-secondary text-foreground" : "bg-primary text-primary-foreground border-transparent"
+                    }`}
+                  >
+                    {isControlPending ? (
+                      <span className="h-3.5 w-3.5 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                    ) : isRunning ? (
+                      <svg viewBox="0 0 24 24" className="h-4 w-4 fill-current" aria-hidden="true">
+                        <path d="M7 5h4v14H7zM13 5h4v14h-4z" />
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" className="h-4 w-4 fill-current" aria-hidden="true">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    )}
+                  </button>
+                )}
+                <div className="flex gap-4 text-sm font-mono font-medium">
                 <span className="text-primary flex items-center gap-1">↓ {formatSpeed(downloadProgress?.downloadSpeed ?? 0)}</span>
                 <span className="text-accent flex items-center gap-1">↑ {formatSpeed(downloadProgress?.uploadSpeed ?? 0)}</span>
+                </div>
               </div>
             </div>
             <div className="w-full h-2 rounded-full bg-secondary overflow-hidden mt-2">
               <div className={`h-full rounded-full bg-primary transition-all duration-300 ${isRunning ? "progress-animated" : ""}`} style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} />
             </div>
-            <p className="text-xs font-mono font-medium text-foreground/50 mt-2 text-right">{progress.toFixed(1)}% Completed</p>
-          </div>
-        </section>
-
-        <section className="animate-fade-in-up delay-150 grid sm:grid-cols-2 lg:grid-cols-5 gap-3">
-          <div className="rounded-lg border bg-card px-3 py-2">
-            <p className="text-[10px] uppercase font-mono text-foreground/50">Discovery</p>
-            <p className="text-xl font-semibold">{phaseSummary.discovery}</p>
-          </div>
-          <div className="rounded-lg border bg-card px-3 py-2">
-            <p className="text-[10px] uppercase font-mono text-foreground/50">Handshake</p>
-            <p className="text-xl font-semibold text-primary">{phaseSummary.handshake}</p>
-          </div>
-          <div className="rounded-lg border bg-card px-3 py-2">
-            <p className="text-[10px] uppercase font-mono text-foreground/50">Transfer</p>
-            <p className="text-xl font-semibold text-accent">{phaseSummary.transfer}</p>
-          </div>
-          <div className="rounded-lg border bg-card px-3 py-2">
-            <p className="text-[10px] uppercase font-mono text-foreground/50">Verified</p>
-            <p className="text-xl font-semibold text-green-500">{phaseSummary.verification}</p>
-          </div>
-          <div className="rounded-lg border bg-card px-3 py-2">
-            <p className="text-[10px] uppercase font-mono text-foreground/50">Errors</p>
-            <p className="text-xl font-semibold text-destructive">{phaseSummary.error}</p>
+            <div className="flex items-center justify-between mt-2.5 gap-3">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-medium text-foreground/70">Seeding</span>
+                <button
+                  onClick={() => {
+                    if (!isSeeding) {
+                      handleToggleSeeding(false);
+                    } else {
+                      handleToggleSeeding(true);
+                    }
+                  }}
+                  disabled={isSeedingTogglePending}
+                  className="relative inline-block"
+                  title={isSeeding ? "Seeding: ON - Click to disable" : "Seeding: OFF - Click to enable"}
+                >
+                  <div className={`relative inline-flex h-4 w-7 items-center rounded-full transition-all ${
+                    isSeeding ? "bg-red-600" : "bg-secondary"
+                  }`}>
+                    <span
+                      className={`inline-block h-3 w-3 transform rounded-full bg-background transition-transform ${
+                        isSeeding ? "translate-x-3.5" : "translate-x-0.5"
+                      }`}
+                    />
+                  </div>
+                </button>
+              </div>
+              <p className="text-xs font-mono font-medium text-foreground/50">{progress.toFixed(1)}% Completed</p>
+            </div>
           </div>
         </section>
 
         <section className="animate-fade-in-up delay-175">
-          <PieceGrid pieces={pieces} totalPieces={pieceTotal} maxDisplay={1200} />
+          <PieceGrid pieces={pieces} totalPieces={pieceTotal} maxDisplay={420} tileSizePx={11} fullScreenHref={`/torrent/${sessionId}/pieces`} />
         </section>
 
         <section className="animate-fade-in-up delay-200">
@@ -807,43 +1089,86 @@ export default function TorrentSessionView({
               <div className="h-4 w-1 bg-primary rounded-full"></div>
               <h2 className="text-sm font-bold text-foreground/80 uppercase tracking-widest font-mono">Peer Connectivity Topology</h2>
             </div>
-            <div className="flex items-center gap-4">
-              <span className="text-xs font-mono px-2.5 py-1 rounded-md bg-secondary text-foreground/70 font-medium">
-                {graphPeers.length} nodes • {trackers} trackers
-              </span>
-              <Link
-                href={`/torrent/${sessionId}/map`}
-                className="text-xs font-semibold px-3 py-1.5 rounded-md border border-primary/50 text-primary hover:bg-primary/10 transition-colors"
-              >
-                Launch Full Topology ↦
-              </Link>
-            </div>
+            <span className="text-xs font-mono px-2.5 py-1 rounded-md bg-secondary text-foreground/70 font-medium">
+              {graphPeers.length} nodes • {trackers} trackers
+            </span>
           </div>
 
           <div className="grid xl:grid-cols-[2fr_1fr] gap-5">
-            <div className="rounded-xl border bg-card overflow-hidden shadow-sm relative p-3">
-              <PeerGraph peers={graphPeers} />
+            <div className="relative">
+              <div className="rounded-xl border bg-card overflow-hidden shadow-sm relative p-3">
+                <PeerGraph peers={graphPeers} showGuide={false} monochromeLinks={true} animatedLinks={true} />
+                <div className="absolute right-8 bottom-8 z-10">
+                  <Link
+                    href={`/torrent/${sessionId}/map`}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-md border border-primary/50 text-primary hover:bg-primary/10 transition-colors bg-background/85"
+                  >
+                    Launch Full Topology ↦
+                  </Link>
+                </div>
+              </div>
             </div>
 
             <div className="rounded-xl border bg-card p-4">
-              <h3 className="text-xs font-bold text-foreground/70 uppercase tracking-wider font-mono mb-3">Handshake lanes</h3>
+              <h3 className="text-xs font-bold text-foreground/70 uppercase tracking-wider font-mono mb-3">Swarm Insights</h3>
+              <div className="grid grid-cols-3 gap-2 mb-3 text-[11px] font-mono">
+                <div className="rounded-md border bg-background px-2 py-1.5">
+                  <p className="text-foreground/55">Verified</p>
+                  <p className="font-semibold text-green-600">{verifiedPeers}</p>
+                </div>
+                <div className="rounded-md border bg-background px-2 py-1.5">
+                  <p className="text-foreground/55">Requesting</p>
+                  <p className="font-semibold text-accent">{activeRequestPeers}</p>
+                </div>
+                <div className="rounded-md border bg-background px-2 py-1.5">
+                  <p className="text-foreground/55">Peer bytes</p>
+                  <p className="font-semibold text-primary">{formatBytes(totalDownloadedByPeers)}</p>
+                </div>
+              </div>
+
+              <div className="mb-2 text-[11px] font-mono text-foreground/60">Top data contributors</div>
               <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-                {graphPeers.slice(0, 18).map((peer) => (
-                  <div key={peer.id} className="rounded-lg border bg-background p-3">
-                    <div className="flex items-center justify-between text-xs font-mono mb-2">
-                      <span className="text-foreground/70 truncate max-w-[170px]">{peer.label}</span>
-                      <span className="font-semibold text-primary">{STAGE_LABELS[peer.stage]}</span>
+                {topContributors.map((peer) => {
+                  const peerId = peer.peerId ?? `${peer.ip}:${peer.port}`;
+                  const sharePct = topContributors.length > 0 && topContributors[0].downloadedBytes > 0
+                    ? Math.min(100, (peer.downloadedBytes / topContributors[0].downloadedBytes) * 100)
+                    : 0;
+
+                  return (
+                    <div key={peerId} className="rounded-lg border bg-background p-3">
+                      <div className="flex items-center justify-between text-xs font-mono mb-2">
+                        <span className="text-foreground/70 truncate max-w-[170px]">{peer.ip}:{peer.port}</span>
+                        <span className="font-semibold text-primary">{formatBytes(peer.downloadedBytes)}</span>
+                      </div>
+                      <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+                        <div className="h-full bg-primary/80" style={{ width: `${sharePct}%` }} />
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] text-foreground/60 font-mono mt-2">
+                        <span>{peer.pendingRequests} req pending</span>
+                        <span>{peer.choked ? "choked" : "active"}</span>
+                      </div>
                     </div>
-                    <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-                      <div className="h-full bg-gradient-to-r from-accent via-primary to-green-500" style={{ width: `${((peer.stage + 1) / 5) * 100}%` }} />
+                  );
+                })}
+
+                {topContributors.length === 0 && (
+                  <p className="text-sm text-foreground/50 font-mono">Waiting for transfer contribution data</p>
+                )}
+
+                {requestHotspots.length > 0 && (
+                  <div className="pt-2">
+                    <div className="mb-2 text-[11px] font-mono text-foreground/60">Request hotspots</div>
+                    {requestHotspots.map((peer) => {
+                      const peerId = peer.peerId ?? `${peer.ip}:${peer.port}`;
+                      return (
+                        <div key={`req-${peerId}`} className="text-[11px] font-mono text-foreground/70 flex items-center justify-between py-1">
+                          <span className="truncate max-w-[190px]">{peer.ip}:{peer.port}</span>
+                          <span className="text-accent font-semibold">{peer.pendingRequests} req</span>
+                        </div>
+                      );
+                    })}
                     </div>
-                    <div className="flex items-center justify-between text-[11px] text-foreground/60 font-mono mt-2">
-                      <span>{peer.downloadLabel}</span>
-                      <span>{peer.uploadLabel}</span>
-                    </div>
-                  </div>
-                ))}
-                {graphPeers.length === 0 && <p className="text-sm text-foreground/50 font-mono">Waiting for peer activity</p>}
+                )}
               </div>
             </div>
           </div>
@@ -897,7 +1222,9 @@ export default function TorrentSessionView({
 
               {selectedPeer && (() => {
                 const peerId = selectedPeer.peerId ?? `${selectedPeer.ip}:${selectedPeer.port}`;
-                const ownedPct = pieceTotal > 0 ? Math.min(100, (selectedPeer.piecesAvailable / pieceTotal) * 100) : 0;
+                const ownedPct = selectedPeer.piecesAvailableKnown && pieceTotal > 0
+                  ? Math.min(100, (selectedPeer.piecesAvailable / pieceTotal) * 100)
+                  : 0;
                 const fetchedPiecesEstimate = avgPieceBytes > 0
                   ? Math.min(pieceTotal, Math.floor(selectedPeer.downloadedBytes / avgPieceBytes))
                   : 0;
@@ -910,15 +1237,20 @@ export default function TorrentSessionView({
                       <Link href={`/peer/${peerId}`} className="text-xs font-semibold text-primary hover:underline">open</Link>
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-                      <div>Owned: {selectedPeer.piecesAvailable}/{Math.max(1, pieceTotal)}</div>
+                      <div>
+                        Owned: {selectedPeer.piecesAvailableKnown
+                          ? `${selectedPeer.piecesAvailable}/${Math.max(1, pieceTotal)}`
+                          : "unknown (peer bitfield not exposed)"}
+                      </div>
                       <div>Fetched: {fetchedPiecesEstimate}/{Math.max(1, pieceTotal)}</div>
                       <div>Stage: {stageLabel}</div>
                       <div>Pending: {selectedPeer.pendingRequests}</div>
+                      <div>Enc: {selectedPeer.encryption === "mse-rc4" ? "MSE/RC4" : selectedPeer.encryption}</div>
                     </div>
                     <div className="mt-3">
                       <div className="text-[11px] text-foreground/60 mb-1">Piece ownership</div>
                       <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
-                        <div className="h-full bg-primary" style={{ width: `${ownedPct}%` }} />
+                        <div className={`h-full ${selectedPeer.piecesAvailableKnown ? "bg-primary" : "bg-foreground/30"}`} style={{ width: `${ownedPct}%` }} />
                       </div>
                     </div>
                   </div>
@@ -938,32 +1270,173 @@ export default function TorrentSessionView({
                 <h2 className="text-sm font-bold text-foreground/80 uppercase tracking-widest font-mono">Protocol Event Stream</h2>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => setEventStreamPaused((value) => !value)} className="rounded-md border px-3 py-1 text-xs font-semibold hover:bg-secondary">
+                <button
+                  onClick={() => setEventViewMode((current) => (current === "log" ? "timeline" : "log"))}
+                  className="rounded-md border px-3 py-1 text-xs font-semibold hover:bg-secondary"
+                >
+                  {eventViewMode === "log" ? "Timeline view" : "Protocol log view"}
+                </button>
+                <button onClick={handleToggleEventStreamPause} className="rounded-md border px-3 py-1 text-xs font-semibold hover:bg-secondary">
                   {eventStreamPaused ? "Resume" : "Pause"}
                 </button>
               </div>
             </div>
 
             <div className="rounded-xl border bg-background overflow-hidden relative shadow-inner">
-              <div className="px-4 py-2 border-b bg-secondary/20 text-[11px] font-mono text-foreground/60">
-                Timeline only includes protocol milestones and filtered verification checkpoints.
+              <div className="px-4 py-2 border-b bg-secondary/20 text-[11px] font-mono text-foreground/60 space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    value={eventSearchText}
+                    onChange={(event) => setEventSearchText(event.target.value)}
+                    placeholder="Search event type, summary, peer..."
+                    className="h-7 w-56 rounded-md border bg-background px-2 text-[11px]"
+                  />
+                  <select
+                    value={eventMode}
+                    onChange={(event) => setEventMode(event.target.value as "all" | "important" | "errors")}
+                    className="h-7 rounded-md border bg-background px-2 text-[11px]"
+                  >
+                    <option value="all">All events</option>
+                    <option value="important">Milestones only</option>
+                    <option value="errors">Errors only</option>
+                  </select>
+                  <select
+                    value={eventPhaseFilter}
+                    onChange={(event) => setEventPhaseFilter(event.target.value as "all" | EventPhase)}
+                    className="h-7 rounded-md border bg-background px-2 text-[11px]"
+                  >
+                    <option value="all">All phases</option>
+                    <option value="system">System</option>
+                    <option value="discovery">Discovery</option>
+                    <option value="handshake">Handshake</option>
+                    <option value="transfer">Transfer</option>
+                    <option value="verification">Verification</option>
+                    <option value="error">Error</option>
+                  </select>
+                  <select
+                    value={String(eventLimit)}
+                    onChange={(event) => setEventLimit(Number(event.target.value))}
+                    className="h-7 rounded-md border bg-background px-2 text-[11px]"
+                  >
+                    <option value="60">Last 60</option>
+                    <option value="120">Last 120</option>
+                    <option value="220">Last 220</option>
+                  </select>
+                </div>
+                <div>{displayEvents.length} events shown. Click a row to inspect details.</div>
               </div>
-              <div className="absolute top-0 w-full h-8 bg-gradient-to-b from-background to-transparent z-10 pointer-events-none" />
-              <div className="h-[360px] overflow-y-auto p-5 font-mono text-xs space-y-2.5">
-                {displayEvents.map((line, i) => (
-                  <div key={line.id} className={`flex items-start gap-3 ${i === displayEvents.length - 1 ? "animate-fade-in-up" : ""}`}>
-                    <span className="text-foreground/30 flex-shrink-0 mt-0.5">{formatTime(line.timestamp)}</span>
-                    <span className={line.level === "error" ? "text-destructive" : line.phase === "handshake" ? "text-accent" : "text-foreground/60"}>
-                      [{line.type}] {line.summary}
-                    </span>
+              {eventViewMode === "log" ? (
+                <>
+                  <div className="border-b px-4 py-2 bg-card text-xs font-mono text-foreground/50 flex items-center gap-3">
+                    <span className="h-2.5 w-2.5 rounded-full bg-destructive/80" />
+                    <span className="h-2.5 w-2.5 rounded-full bg-yellow-500/80" />
+                    <span className="h-2.5 w-2.5 rounded-full bg-green-500/80" />
+                    <span className="ml-2">protocol_log</span>
                   </div>
-                ))}
-                {displayEvents.length === 0 && <p className="text-foreground/50">Waiting for events...</p>}
-              </div>
+                  <div className="h-[445px] overflow-y-auto p-4 font-mono text-[13px] leading-6 bg-background/80">
+                    {displayEvents.map((line, i) => {
+                      const tag = protocolTagForEvent(line);
+                      return (
+                        <button
+                          key={line.id}
+                          onClick={() => setSelectedEventId(line.id)}
+                          className={`w-full text-left rounded px-1 transition-colors ${
+                            selectedEventId === line.id ? "bg-secondary/45" : "hover:bg-secondary/30"
+                          } ${i === displayEvents.length - 1 ? "animate-fade-in-up" : ""}`}
+                        >
+                          <span className={`${protocolTagClass[tag]} font-semibold`}>[{tag}]</span>
+                          <span className="text-foreground/70 ml-2">{line.summary}</span>
+                        </button>
+                      );
+                    })}
+                    {displayEvents.length === 0 && <p className="text-foreground/50">Waiting for events...</p>}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="absolute top-0 w-full h-8 bg-gradient-to-b from-background to-transparent z-10 pointer-events-none" />
+                  <div className="h-[445px] overflow-y-auto p-5 font-mono text-xs space-y-2.5">
+                    {displayEvents.map((line, i) => (
+                      <button
+                        key={line.id}
+                        onClick={() => setSelectedEventId(line.id)}
+                        className={`w-full text-left rounded-md px-1.5 py-1 transition-colors ${
+                          selectedEventId === line.id ? "bg-secondary/45" : "hover:bg-secondary/30"
+                        } ${i === displayEvents.length - 1 ? "animate-fade-in-up" : ""}`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <span className="text-foreground/30 flex-shrink-0 mt-0.5">{formatTime(line.timestamp)}</span>
+                          <span className={line.level === "error" ? "text-destructive" : line.phase === "handshake" ? "text-accent" : "text-foreground/60"}>
+                            [{line.type}] {line.summary}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                    {displayEvents.length === 0 && <p className="text-foreground/50">Waiting for events...</p>}
+                  </div>
+                </>
+              )}
+              {selectedEvent && (
+                <div className="border-t bg-secondary/10 px-4 py-2 text-[11px] font-mono text-foreground/70">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span>type: {selectedEvent.type}</span>
+                    <span>phase: {selectedEvent.phase}</span>
+                    {selectedEvent.peerKey && <span>peer: {selectedEvent.peerKey}</span>}
+                    <span>time: {formatTime(selectedEvent.timestamp)}</span>
+                  </div>
+                  <div className="mt-1 text-foreground/80">{selectedEvent.summary}</div>
+                </div>
+              )}
             </div>
           </section>
         </div>
           </>
+        )}
+
+        {showSeedingModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+            <div className="rounded-xl border bg-card shadow-2xl max-w-md mx-4 p-6 animate-fade-in-up">
+              <h2 className="text-xl font-bold tracking-tight mb-3">Enable Seeding?</h2>
+              
+              <div className="space-y-3 mb-6 text-sm text-foreground/80">
+                <p>
+                  <strong>What is seeding?</strong><br/>
+                  Seeding means uploading pieces of the file you've downloaded to other people who are trying to get the same content.
+                </p>
+                
+                <p>
+                  <strong>How does it help?</strong><br/>
+                  When you seed, you help others download faster and keep the torrent alive for future users. The more people seeding, the healthier the network.
+                </p>
+                
+                <p>
+                  <strong>When will it start?</strong><br/>
+                  Seeding will begin immediately, even while you're still downloading. You'll share pieces as soon as they're verified.
+                </p>
+
+                <p>
+                  <strong>What's the impact?</strong><br/>
+                  Your upload bandwidth will be used. Other peers will connect to you to download what you have. You can stop anytime.
+                </p>
+              </div>
+
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowSeedingModal(false)}
+                  className="flex-1 rounded-md border px-4 py-2 text-sm font-semibold hover:bg-secondary transition-colors"
+                >
+                  Not Now
+                </button>
+                <button
+                  onClick={() => handleToggleSeeding(true)}
+                  disabled={isSeedingTogglePending}
+                  className="flex-1 rounded-md border-transparent bg-accent text-accent-foreground px-4 py-2 text-sm font-semibold hover:bg-accent/90 disabled:opacity-60 transition-colors"
+                >
+                  {isSeedingTogglePending ? "Enabling..." : "Yes, Let's Seed"}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>

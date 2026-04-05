@@ -62,6 +62,8 @@ export default function FullScreenMapPage() {
           activity,
           downloadLabel: `${(peer.downloadedBytes / 1024 / 1024).toFixed(1)} MB`,
           uploadLabel: `${peer.pendingRequests} req`,
+          pendingRequests: peer.pendingRequests,
+          piecesAvailable: peer.piecesAvailable,
         };
       }),
     [peers]
@@ -83,7 +85,7 @@ export default function FullScreenMapPage() {
         <div className="mb-3 text-xs text-foreground/60 font-mono uppercase tracking-wider">
           Active peer graph ({graphPeers.length} visible)
         </div>
-        <PeerGraph peers={graphPeers} />
+        <PeerGraph peers={graphPeers} showGuide={true} monochromeLinks={false} animatedLinks={true} />
       </section>
     </div>
   );

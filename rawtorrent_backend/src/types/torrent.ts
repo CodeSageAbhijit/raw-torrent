@@ -61,9 +61,18 @@ export interface TorrentSessionState {
   completedPieces: number[];
   progress: number;
   status: "idle" | "starting" | "running" | "paused" | "completed" | "error";
+  seeding: boolean;
   createdAt: number;
   updatedAt: number;
   userId?: string;
+}
+
+export interface TorrentFileInfo {
+  index: number;
+  name: string;
+  path: string;
+  length: number;
+  selected: boolean;
 }
 
 export interface StartTorrentOptions {
@@ -72,4 +81,5 @@ export interface StartTorrentOptions {
   fileName?: string;
   sessionId?: string;
   userId?: string;
+  selectedFileIndices?: number[];
 }

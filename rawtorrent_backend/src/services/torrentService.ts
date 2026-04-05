@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import WebTorrent from "webtorrent";
-import type { StartTorrentOptions, TorrentSessionState, TrackerPeerDescriptor } from "../types/torrent";
+import bencode from "bencode";
+import type { StartTorrentOptions, TorrentSessionState, TrackerPeerDescriptor, TorrentFileInfo } from "../types/torrent";
 import { publishEvent } from "../redis/publisher";
 import { appendSessionEvent, listSessionsByUser, loadSession, persistSession } from "./persistenceService";
 import { ensureSessionStorage, getSessionStoragePaths, writeDownloadMetadata } from "./fileStorageService";
+import { getGlobalSettings } from "../settings";
 
 type TorrentLike = any;
 
@@ -36,8 +38,10 @@ type PeerDownloadState = {
   peerId?: string;
   choked: boolean;
   piecesAvailable: number;
+  piecesAvailableKnown: boolean;
   downloadedBytes: number;
   pendingRequests: number;
+  encryption: "unknown" | "plaintext" | "mse-rc4";
 };
 
 type ManagedSession = {
@@ -58,6 +62,8 @@ const pauseTeardownTasks = new Map<string, Promise<void>>();
 
 const DEFAULT_TRACKERS = [
   "udp://tracker.opentrackr.org:1337/announce",
+  "udp://tracker.openbittorrent.com:80/announce",
+  "udp://tracker.publicbt.com:80/announce",
   "udp://open.stealth.si:80/announce",
   "udp://tracker.torrent.eu.org:451/announce",
   "udp://explodie.org:6969/announce",
@@ -67,6 +73,8 @@ const DEFAULT_TRACKERS = [
   "udp://exodus.desync.com:6969/announce",
   "http://tracker.opentrackr.org:1337/announce",
   "https://tracker.opentrackr.org:443/announce",
+  "udp://tracker.1337x.com:6969/announce",
+  "udp://tracker.zer0day.to:1337/announce",
 ];
 
 export const torrentSessions = sessions;
@@ -74,8 +82,8 @@ export const torrentSessions = sessions;
 const client = new WebTorrent({
   dht: true,
   tracker: true,
-  maxConns: Number(process.env.MAX_CONCURRENT_PEER_CONNECTIONS ?? 40), // Capped to 40 to prevent OOM/Disk Thrashing on large files
-  downloadLimit: 25000000, // 25 MB/s global cap to prevent disk IO locking
+  maxConns: 300, // Global connection pool - individual torrents will respect their per-session limits via settings
+  downloadLimit: 0, // No global download limit
 });
 
 client.on("error", (err: Error) => {
@@ -119,6 +127,48 @@ const parsePeerAddress = (address: string | undefined) => {
   return { ip, port };
 };
 
+const getPeerLabel = (wire: any, address: { ip: string; port: number }) => {
+  const peerId = String(wire?.peerId ?? "").trim();
+  if (peerId) {
+    return `peer-${peerId.slice(-3)}`;
+  }
+
+  if (address.ip !== "unknown") {
+    const compactIp = address.ip.split(".").slice(-2).join("-");
+    return `peer-${compactIp}`;
+  }
+
+  return "peer-unk";
+};
+
+const inferPeerEncryption = (wire: any): "unknown" | "plaintext" | "mse-rc4" => {
+  const encryptedFlags = [
+    wire?.encrypted,
+    wire?.isEncrypted,
+    wire?._encrypted,
+    wire?.peerEncrypted,
+    wire?._pe1,
+    wire?.cryptoHandshakeDone,
+    wire?._cryptoHandshakeDone,
+  ];
+
+  if (encryptedFlags.some((value) => value === true)) {
+    return "mse-rc4";
+  }
+
+  const explicitTransportEncryption = wire?.conn?.encrypted;
+  if (typeof explicitTransportEncryption === "boolean") {
+    return explicitTransportEncryption ? "mse-rc4" : "plaintext";
+  }
+
+  const explicitFalseFlags = [wire?.encrypted, wire?.isEncrypted, wire?._encrypted, wire?.peerEncrypted];
+  if (explicitFalseFlags.some((value) => value === false)) {
+    return "plaintext";
+  }
+
+  return "unknown";
+};
+
 const emitEvent = async (event: {
   type: string;
   sessionId: string;
@@ -138,13 +188,11 @@ const syncSession = async (session: TorrentSessionState) => {
 };
 
 const getTrackerPool = () => {
+  const settings = getGlobalSettings();
+  // Use trackers from settings, falling back to environment variables, then defaults
   const configuredPrimary = (process.env.TORRENT_TRACKER_URL ?? "").trim();
-  const configuredExtra = (process.env.EXTRA_TRACKERS ?? "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-
-  return Array.from(new Set([configuredPrimary, ...configuredExtra, ...DEFAULT_TRACKERS].filter(Boolean)));
+  const allTrackers = Array.from(new Set([configuredPrimary, ...settings.extraTrackers, ...DEFAULT_TRACKERS].filter(Boolean)));
+  return allTrackers;
 };
 
 const getPeersFromTorrent = (torrent: TorrentLike): TrackerPeerDescriptor[] => {
@@ -154,13 +202,15 @@ const getPeersFromTorrent = (torrent: TorrentLike): TrackerPeerDescriptor[] => {
 
   for (const wire of wireList) {
     const address = parsePeerAddress(wire?.remoteAddress);
+    const remotePort = Number(wire?.remotePort ?? wire?._socket?.remotePort ?? 0);
+    const resolvedPort = address.port > 0 ? address.port : remotePort;
     const key = `${address.ip}:${address.port}`;
-    if (seen.has(key) || address.port <= 0) {
+    if (seen.has(`${address.ip}:${resolvedPort}`) || resolvedPort <= 0) {
       continue;
     }
 
-    seen.add(key);
-    peers.push({ ip: address.ip, port: address.port, peerId: wire?.peerId });
+    seen.add(`${address.ip}:${resolvedPort}`);
+    peers.push({ ip: address.ip, port: resolvedPort, peerId: wire?.peerId });
   }
 
   return peers;
@@ -199,7 +249,6 @@ const updatePieceStatesInPlace = (torrent: TorrentLike, states: PieceState[]): P
   }
 
   if (states.length !== piecesTotal) {
-    states.length = 0;
     for (let index = 0; index < piecesTotal; index += 1) {
       states.push({
         index,
@@ -221,24 +270,51 @@ const updatePieceStatesInPlace = (torrent: TorrentLike, states: PieceState[]): P
 
 const updatePeerStatesInPlace = (torrent: TorrentLike, states: PeerDownloadState[]): PeerDownloadState[] => {
   const wires: any[] = Array.isArray(torrent?.wires) ? torrent.wires : [];
+  const pieceUniverse = Number(torrent?.pieces?.length ?? torrent?.numPieces ?? 0);
   
   // Resize if needed (unlikely to need shrink unless peers dropped, but we map fresh to be safe if count changes vastly)
   // Instead of fully rebuilding, just map fresh. It's only ~100 objects maximum normally.
   states.length = 0;
   for (const wire of wires) {
     const address = parsePeerAddress(wire?.remoteAddress);
-    const piecesAvailable = Array.isArray(wire?.peerPieces)
-      ? wire.peerPieces.filter(Boolean).length
-      : Number(wire?.peerPieces?.length ?? 0);
+    const remotePort = Number(wire?.remotePort ?? wire?._socket?.remotePort ?? 0);
+    const resolvedPort = address.port > 0 ? address.port : remotePort;
+    const peerPieces = wire?.peerPieces;
+    let piecesAvailable = 0;
+    let piecesAvailableKnown = false;
+
+    if (Array.isArray(peerPieces)) {
+      piecesAvailable = peerPieces.filter(Boolean).length;
+      piecesAvailableKnown = true;
+    } else if (peerPieces && typeof peerPieces.get === "function" && pieceUniverse > 0) {
+      let count = 0;
+      for (let index = 0; index < pieceUniverse; index += 1) {
+        if (peerPieces.get(index)) {
+          count += 1;
+        }
+      }
+      piecesAvailable = count;
+      piecesAvailableKnown = true;
+    } else if (typeof peerPieces?.length === "number" && peerPieces.length > 0) {
+      piecesAvailable = Number(peerPieces.length);
+      piecesAvailableKnown = true;
+    }
+
+    if (!piecesAvailableKnown && Number(wire?.downloaded ?? 0) > 0) {
+      piecesAvailableKnown = false;
+      piecesAvailable = 0;
+    }
 
     states.push({
       ip: address.ip,
-      port: address.port,
+      port: resolvedPort,
       peerId: wire?.peerId,
       choked: Boolean(wire?.peerChoking),
       piecesAvailable,
+      piecesAvailableKnown,
       downloadedBytes: Number(wire?.downloaded ?? 0),
       pendingRequests: Array.isArray(wire?.requests) ? wire.requests.length : 0,
+      encryption: inferPeerEncryption(wire),
     });
   }
 
@@ -291,6 +367,8 @@ const updateManagedSessionSnapshot = async (managedSession: ManagedSession) => {
   // Determine if it actually progressed to avoid spamming I/O
   const prevDownloadedBytes = managedSession.progress?.downloadedBytes ?? 0;
 
+  const previousCompleted = new Set(managedSession.session.completedPieces ?? []);
+
   managedSession.progress = computeProgress(torrent);
   managedSession.pieceStates = updatePieceStatesInPlace(torrent, managedSession.pieceStates);
   managedSession.peerStates = updatePeerStatesInPlace(torrent, managedSession.peerStates);
@@ -302,6 +380,8 @@ const updateManagedSessionSnapshot = async (managedSession: ManagedSession) => {
   managedSession.session.completedPieces = managedSession.pieceStates
     .filter((piece) => piece.completed)
     .map((piece) => piece.index);
+
+  const newlyVerifiedPieces = managedSession.session.completedPieces.filter((pieceIndex) => !previousCompleted.has(pieceIndex));
   
   const now = Date.now();
   // Only sync to disk every 5 seconds to reduce brutal lag, OR if it hits 100%.
@@ -320,6 +400,30 @@ const updateManagedSessionSnapshot = async (managedSession: ManagedSession) => {
 
   if (shouldSync) {
     await syncSession(managedSession.session);
+  }
+
+  if (newlyVerifiedPieces.length > 0) {
+    const peersNow = managedSession.progress.activePeers;
+    for (const pieceIndex of newlyVerifiedPieces.slice(0, 3)) {
+      await emitEvent({
+        type: "piece_verified",
+        sessionId: managedSession.session.sessionId,
+        data: {
+          pieceIndex,
+          hash: "sha1",
+          result: "ok",
+        },
+      });
+
+      await emitEvent({
+        type: "peer_have_piece",
+        sessionId: managedSession.session.sessionId,
+        data: {
+          pieceIndex,
+          peers: peersNow,
+        },
+      });
+    }
   }
 
   // Throttle websocket emissions as well to only when progressing
@@ -399,6 +503,106 @@ const bindTorrentEvents = (managedSession: ManagedSession) => {
 
   torrent.on("wire", async (wire: any) => {
     const address = parsePeerAddress(wire?.remoteAddress);
+    const remotePort = Number(wire?.remotePort ?? wire?._socket?.remotePort ?? 0);
+    const resolvedPort = address.port > 0 ? address.port : remotePort;
+    const peerLabel = getPeerLabel(wire, { ip: address.ip, port: resolvedPort });
+
+    const fire = (type: string, data: Record<string, unknown>) => {
+      void emitEvent({
+        type,
+        sessionId: managedSession.session.sessionId,
+        data,
+      });
+    };
+
+    fire("peer_handshake", {
+      ip: address.ip,
+      port: resolvedPort,
+      peerId: wire?.peerId,
+      peerLabel,
+      transport: "tcp",
+    });
+
+    const peerPieces = wire?.peerPieces;
+    let piecesAvailable: number | null = null;
+    if (Array.isArray(peerPieces)) {
+      piecesAvailable = peerPieces.filter(Boolean).length;
+    } else if (peerPieces && typeof peerPieces.get === "function") {
+      const pieceUniverse = Number(torrent?.pieces?.length ?? torrent?.numPieces ?? 0);
+      if (pieceUniverse > 0) {
+        let count = 0;
+        for (let index = 0; index < pieceUniverse; index += 1) {
+          if (peerPieces.get(index)) {
+            count += 1;
+          }
+        }
+        piecesAvailable = count;
+      }
+    }
+
+    if (typeof piecesAvailable === "number") {
+      fire("peer_bitfield", {
+        ip: address.ip,
+        port: resolvedPort,
+        peerId: wire?.peerId,
+        peerLabel,
+        piecesAvailable,
+      });
+    }
+
+    wire.on("interested", () => {
+      fire("peer_interested", {
+        ip: address.ip,
+        port: resolvedPort,
+        peerId: wire?.peerId,
+        peerLabel,
+      });
+    });
+
+    wire.on("unchoke", () => {
+      fire("peer_unchoked", {
+        ip: address.ip,
+        port: resolvedPort,
+        peerId: wire?.peerId,
+        peerLabel,
+      });
+    });
+
+    wire.on("request", (pieceIndex: number, offset: number, length: number) => {
+      fire("block_requested", {
+        ip: address.ip,
+        port: resolvedPort,
+        peerId: wire?.peerId,
+        peerLabel,
+        pieceIndex,
+        offset,
+        length,
+      });
+    });
+
+    wire.on("piece", (pieceIndex: number, offset: number, buffer: Buffer) => {
+      fire("block_received", {
+        ip: address.ip,
+        port: resolvedPort,
+        peerId: wire?.peerId,
+        peerLabel,
+        pieceIndex,
+        offset,
+        bytes: Number(buffer?.length ?? 0),
+      });
+    });
+
+    wire.on("have", (pieceIndex: number) => {
+      fire("peer_have_piece", {
+        ip: address.ip,
+        port: resolvedPort,
+        peerId: wire?.peerId,
+        peerLabel,
+        pieceIndex,
+        peers: Number(Array.isArray(torrent?.wires) ? torrent.wires.length : 0),
+      });
+    });
+
     // Log lightly on interval, or just let 'download' summarize it. 
     // console.log(`[Torrent: ${managedSession.session.sessionId}] [+] Peer Connected: ${address.ip}:${address.port}. Active Wires: ${torrent.wires?.length || 0}`);
     
@@ -498,15 +702,43 @@ const attachTorrentToManagedSession = async (managedSession: ManagedSession, fal
   const storage = getSessionStoragePaths(managedSession.session.sessionId, fallbackName);
   ensureSessionStorage(storage);
 
+  const settings = getGlobalSettings();
   const announcePool = getTrackerPool();
+  
   const torrent = client.add(managedSession.source, {
     path: storage.sessionDir,
     announce: announcePool,
     destroyStoreOnDestroy: false,
+    // Apply user settings to this torrent
+    maxRequests: settings.maxRequestsPerPeer,
   });
 
   managedSession.torrent = torrent;
   bindTorrentEvents(managedSession);
+
+  // Apply piece selection strategy (if supported by WebTorrent version)
+  try {
+    if (settings.pieceSelectionStrategy === "sequential") {
+      // Sequential: Request pieces in order (fastest start, good for streaming)
+      if (torrent && typeof torrent.select === "function") {
+        const piecesTotal = Number(torrent?.pieces?.length ?? torrent?.numPieces ?? 0);
+        if (piecesTotal > 0) {
+          // Select all pieces sequentially (don't deselect any)
+          for (let i = 0; i < piecesTotal; i++) {
+            torrent.select(i, false, true); // (index, priority, notify)
+          }
+          console.log(`[${managedSession.session.sessionId}] Applied SEQUENTIAL piece selection strategy`);
+        }
+      }
+    } else if (settings.pieceSelectionStrategy === "rarest-first") {
+      // Rarest-first: Request scarcest pieces first (balances the swarm, better for health)
+      console.log(`[${managedSession.session.sessionId}] Using RAREST-FIRST piece selection strategy (default)`);
+    } else {
+      console.log(`[${managedSession.session.sessionId}] Using RANDOM piece selection strategy`);
+    }
+  } catch (err) {
+    console.warn(`[${managedSession.session.sessionId}] Could not apply piece strategy:`, err instanceof Error ? err.message : err);
+  }
 
   await waitForMetadata(torrent);
 
@@ -531,6 +763,145 @@ const attachTorrentToManagedSession = async (managedSession: ManagedSession, fal
   return { torrent, announces };
 };
 
+// Helper: direct decode of torrent files bypassing WebTorrent
+const decodeTorrentFiles = (buffer: Buffer): TorrentFileInfo[] => {
+  try {
+    const decoded = bencode.decode(buffer);
+    const info = decoded.info;
+    if (!info) throw new Error("No info dictionary found in torrent file");
+
+    // Single file torrent
+    if (!info.files) {
+      const length = Number(info.length || 0);
+      const nameList = Array.isArray(info.name) 
+        ? info.name.map((b: Buffer) => b.toString("utf8"))
+        : [info.name ? info.name.toString("utf8") : "download.bin"];
+      
+      const fileName = nameList[0] || "download.bin";
+      return [{
+        index: 0,
+        name: fileName,
+        path: fileName,
+        length,
+        selected: true,
+      }];
+    }
+
+    // Multi-file torrent
+    const files = info.files;
+    const baseName = info.name ? info.name.toString("utf8") : "download";
+    
+    return files.map((fileObj: any, idx: number) => {
+      let pathSegments: string[] = [];
+      if (Array.isArray(fileObj.path)) {
+        pathSegments = fileObj.path.map((b: Buffer) => b.toString("utf8"));
+      }
+      
+      const filePath = [baseName, ...pathSegments].join("/");
+      const fileName = pathSegments[pathSegments.length - 1] || `${baseName}-file-${idx}`;
+
+      return {
+        index: idx,
+        name: fileName,
+        path: filePath,
+        length: Number(fileObj.length || 0),
+        selected: true,
+      };
+    });
+  } catch (error) {
+    console.error("[decodeTorrentFiles] Error decoding torrent file:", error);
+    throw error;
+  }
+};
+
+// Parse torrent metadata and extract file list without starting download
+export const parseTorrent = async (options: StartTorrentOptions): Promise<TorrentFileInfo[]> => {
+  const { source, sourceType } = getSourceAndType(options);
+  
+  // For .torrent files, decode directly to bypass WebTorrent's unreliability with `torrent.files` sync
+  if (sourceType === "torrent-file" && Buffer.isBuffer(source)) {
+    console.log("[parseTorrent] Extracting files via bencode directly...");
+    return decodeTorrentFiles(source);
+  }
+  
+  // For magnet links, we must use WebTorrent to fetch the metadata from peers
+  console.log("[parseTorrent] Attempting to parse magnet link via WebTorrent temp client...");
+  // Create a temporary client just for parsing
+  const tempClient = new WebTorrent({
+    dht: false,
+    tracker: false,
+  });
+
+  return new Promise((resolve, reject) => {
+    let isResolved = false;
+    let timeout: NodeJS.Timeout | null = null;
+
+    const cleanup = (isError: boolean = false) => {
+      if (timeout) clearTimeout(timeout);
+      try {
+        if (tempClient && typeof tempClient.destroy === "function") {
+          tempClient.destroy((err?: Error) => {
+            if (err) console.error("[parseTorrent] Cleanup error:", err);
+          });
+        }
+      } catch (err) {
+        console.error("[parseTorrent] Cleanup exception:", err);
+      }
+    };
+
+    const finalize = (callback: () => void) => {
+      if (isResolved) return;
+      isResolved = true;
+      cleanup();
+      callback();
+    };
+
+    timeout = setTimeout(() => {
+      finalize(() => {
+        reject(new Error("Timeout parsing torrent (15s) - torrent metadata not received"));
+      });
+    }, 15000); // 15 second timeout instead of 30
+
+    try {
+      const torrent = tempClient.add(source);
+
+      // Listen for metadata or ready event
+      const onMetadata = () => {
+        finalize(() => {
+          try {
+            const files: any[] = Array.isArray(torrent.files) ? torrent.files : [];
+            
+            const fileInfos: TorrentFileInfo[] = files.map((file, index) => ({
+              index,
+              name: String(file.name ?? `file-${index}`),
+              path: String(file.path ?? file.name ?? `file-${index}`),
+              length: Number(file.length ?? 0),
+              selected: true,
+            }));
+
+            resolve(fileInfos);
+          } catch (err) {
+            reject(new Error(`Failed to parse file list: ${err instanceof Error ? err.message : String(err)}`));
+          }
+        });
+      };
+
+      torrent.once("metadata", onMetadata);
+      torrent.once("ready", onMetadata);
+
+      torrent.on("error", (err: Error) => {
+        finalize(() => {
+          reject(new Error(`Failed to parse torrent: ${err.message}`));
+        });
+      });
+    } catch (err) {
+      finalize(() => {
+        reject(new Error(`Exception parsing torrent: ${err instanceof Error ? err.message : String(err)}`));
+      });
+    }
+  });
+};
+
 export const startTorrent = async (options: StartTorrentOptions) => {
   const sessionId = options.sessionId ?? `raw-${Date.now().toString(36)}`;
 
@@ -553,6 +924,7 @@ export const startTorrent = async (options: StartTorrentOptions) => {
     completedPieces: [],
     progress: 0,
     status: "starting",
+    seeding: false,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     userId: options.userId,
@@ -585,6 +957,42 @@ export const startTorrent = async (options: StartTorrentOptions) => {
   await syncSession(session);
 
   const { torrent, announces } = await attachTorrentToManagedSession(managedSession, fallbackName);
+
+  // Handle file selection: explicitly select/deselect files
+  const files: any[] = Array.isArray(torrent?.files) ? torrent.files : [];
+  if (options.selectedFileIndices && Array.isArray(options.selectedFileIndices)) {
+    // Deselect unselected files
+    const selectedSet = new Set(options.selectedFileIndices);
+    for (let i = 0; i < files.length; i++) {
+      if (!selectedSet.has(i) && typeof files[i]?.deselect === "function") {
+        files[i].deselect();
+      }
+    }
+  } else {
+    // If no selection provided, ensure all files are explicitly selected
+    for (let i = 0; i < files.length; i++) {
+      if (typeof files[i]?.select === "function") {
+        files[i].select();
+      }
+    }
+  }
+
+  // DUPLICATE CHECK: Check if this infoHash already exists in other active sessions
+  const infoHash = session.infoHash;
+  if (infoHash && infoHash !== "pending") {
+    for (const [existingSessionId, existingSession] of sessions.entries()) {
+      if (existingSessionId !== sessionId && existingSession.infoHash === infoHash) {
+        // Clean up the session we just created
+        sessions.delete(sessionId);
+        managed.delete(sessionId);
+        await destroyTorrentSafely(managedSession, "stop");
+        
+        throw new Error(
+          `⚠️ This torrent is already being downloaded! Session: ${existingSessionId}. Check the dashboard to view the existing download.`
+        );
+      }
+    }
+  }
 
   session.status = "running";
   session.updatedAt = Date.now();
@@ -729,24 +1137,28 @@ export const pauseTorrent = async (sessionId: string): Promise<boolean> => {
       },
     });
 
-    if (managedSession.torrent && !pauseTeardownTasks.has(sessionId)) {
-      const teardownTask = (async () => {
-        try {
-          await destroyTorrentSafely(managedSession, "pause");
-        } catch (error) {
-          await emitEvent({
-            type: "torrent_error",
-            sessionId,
-            data: {
-              message: error instanceof Error ? error.message : "pause_teardown_failed",
-            },
-          });
-        } finally {
-          pauseTeardownTasks.delete(sessionId);
-        }
-      })();
+    if (managedSession.torrent) {
+      if (typeof managedSession.torrent.pause === "function") {
+        managedSession.torrent.pause();
+      } else if (!pauseTeardownTasks.has(sessionId)) {
+        const teardownTask = (async () => {
+          try {
+            await destroyTorrentSafely(managedSession, "pause");
+          } catch (error) {
+            await emitEvent({
+              type: "torrent_error",
+              sessionId,
+              data: {
+                message: error instanceof Error ? error.message : "pause_teardown_failed",
+              },
+            });
+          } finally {
+            pauseTeardownTasks.delete(sessionId);
+          }
+        })();
 
-      pauseTeardownTasks.set(sessionId, teardownTask);
+        pauseTeardownTasks.set(sessionId, teardownTask);
+      }
     }
 
     return true;
@@ -867,8 +1279,40 @@ export const getTorrentStatus = (sessionId: string) => {
     sessionId,
     status: session.status,
     progress: progress?.progress ?? session.progress,
-    isDownloading: session.status === "running",
+    isDownloading: session.status === "running" && Boolean(managedSession?.torrent),
     peerCount: progress?.activePeers ?? session.peers.length,
     activePeerCount: progress?.activePeers ?? 0,
   };
+};
+
+export const setSeedingEnabled = async (sessionId: string, enabled: boolean): Promise<boolean> => {
+  const managedSession = managed.get(sessionId);
+  if (!managedSession) {
+    return false;
+  }
+
+  try {
+    managedSession.session.seeding = enabled;
+    managedSession.session.updatedAt = Date.now();
+    await syncSession(managedSession.session);
+
+    await emitEvent({
+      type: enabled ? "torrent_seeding_started" : "torrent_seeding_stopped",
+      sessionId,
+      data: {
+        seeding: enabled,
+      },
+    });
+
+    return true;
+  } catch (error) {
+    await emitEvent({
+      type: "torrent_error",
+      sessionId,
+      data: {
+        message: error instanceof Error ? error.message : "seeding_toggle_failed",
+      },
+    });
+    return false;
+  }
 };
