@@ -9,7 +9,7 @@ import type {
   TorrentSessionState,
   TrackerPeerDescriptor,
 } from "../types/torrent";
-import { publishEvent } from "../redis/publisher";
+import { publishEvent } from "../events/eventBus";
 import {
   appendSessionEvent,
   deleteSessionPersistence,
@@ -40,6 +40,7 @@ type DownloadProgress = {
   downloadSpeed: number;
   uploadSpeed: number;
   activePeers: number;
+  discoveredPeers: number;
   piecesCompleted: number;
   piecesTotal: number;
   eta: number;
@@ -87,6 +88,7 @@ type ManagedSession = {
   latestFilePath: string | null;
   lastReannounceAt?: number;
   lastPeerStateRefreshAt?: number;
+  lastPieceStateRefreshAt?: number;
   adaptiveMaxRequests: number;
   adaptiveStrategy: "sequential" | "random" | "rarest-first";
   lastAdaptiveTuneAt?: number;
@@ -100,22 +102,18 @@ const pauseTeardownTasks = new Map<string, Promise<void>>();
 
 const DEFAULT_TRACKERS = [
   "udp://tracker.opentrackr.org:1337/announce",
-  "udp://tracker.openbittorrent.com:80/announce",
-  "udp://tracker.publicbt.com:80/announce",
   "udp://open.stealth.si:80/announce",
   "udp://tracker.torrent.eu.org:451/announce",
   "udp://explodie.org:6969/announce",
   "udp://tracker.tiny-vps.com:6969/announce",
-  "udp://9.rarbg.to:2710/announce",
   "udp://tracker.cyberia.is:6969/announce",
   "udp://exodus.desync.com:6969/announce",
   "http://tracker.opentrackr.org:1337/announce",
   "https://tracker.opentrackr.org:443/announce",
-  "udp://tracker.1337x.com:6969/announce",
-  "udp://tracker.zer0day.to:1337/announce",
 ];
 
 const SEQUENTIAL_SELECTION_PRIORITY = 999;
+const SUPPORTED_TRACKER_PROTOCOLS = new Set(["udp:", "http:", "https:", "ws:", "wss:"]);
 
 const parsePositiveInt = (value: string | undefined, fallback: number): number => {
   const parsed = Number(value);
@@ -124,6 +122,102 @@ const parsePositiveInt = (value: string | undefined, fallback: number): number =
   }
 
   return Math.floor(parsed);
+};
+
+const normalizeTrackerUrl = (value: unknown): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (!SUPPORTED_TRACKER_PROTOCOLS.has(parsed.protocol)) {
+      return null;
+    }
+    return trimmed;
+  } catch {
+    return null;
+  }
+};
+
+const decodeBencodedString = (value: unknown): string => {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+
+  return "";
+};
+
+const dedupeTrackers = (trackers: string[]): string[] => {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+
+  for (const tracker of trackers) {
+    const normalized = normalizeTrackerUrl(tracker);
+    if (!normalized) {
+      continue;
+    }
+
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(normalized);
+  }
+
+  return deduped;
+};
+
+const extractTrackersFromSource = (source: string | Buffer, sourceType: "magnet" | "torrent-file"): string[] => {
+  try {
+    if (sourceType === "magnet" && typeof source === "string") {
+      const sourceText = source.trim();
+      if (!sourceText.startsWith("magnet:?")) {
+        return [];
+      }
+
+      const url = new URL(sourceText);
+      return dedupeTrackers(url.searchParams.getAll("tr"));
+    }
+
+    let torrentBuffer: Buffer | null = null;
+
+    if (Buffer.isBuffer(source)) {
+      torrentBuffer = source;
+    } else if (typeof source === "string" && fs.existsSync(source)) {
+      torrentBuffer = fs.readFileSync(source);
+    }
+
+    if (!torrentBuffer || torrentBuffer.length === 0) {
+      return [];
+    }
+
+    const decoded = bencode.decode(torrentBuffer) as Record<string, unknown>;
+    const announce = decodeBencodedString(decoded.announce);
+    const announceListRaw = Array.isArray(decoded["announce-list"])
+      ? (decoded["announce-list"] as unknown[])
+      : [];
+
+    const announceList = announceListRaw
+      .flatMap((entry) => (Array.isArray(entry) ? entry : [entry]))
+      .map((entry) => decodeBencodedString(entry))
+      .filter((entry) => entry.trim().length > 0);
+
+    return dedupeTrackers([announce, ...announceList]);
+  } catch {
+    return [];
+  }
 };
 
 const DISK_SAFETY_GUARD = {
@@ -373,12 +467,11 @@ const syncSession = async (session: TorrentSessionState) => {
   }
 };
 
-const getTrackerPool = () => {
+const getTrackerPool = (sourceTrackers: string[] = []) => {
   const settings = getGlobalSettings();
   // Use trackers from settings, falling back to environment variables, then defaults
   const configuredPrimary = (process.env.TORRENT_TRACKER_URL ?? "").trim();
-  const allTrackers = Array.from(new Set([configuredPrimary, ...settings.extraTrackers, ...DEFAULT_TRACKERS].filter(Boolean)));
-  return allTrackers;
+  return dedupeTrackers([...sourceTrackers, configuredPrimary, ...settings.extraTrackers, ...DEFAULT_TRACKERS]);
 };
 
 const getPeersFromTorrent = (torrent: TorrentLike): TrackerPeerDescriptor[] => {
@@ -424,6 +517,41 @@ const getFilePathForDownload = (sessionId: string, torrent: TorrentLike): string
   }
 
   return null;
+};
+
+const collectionSize = (value: unknown): number => {
+  if (value instanceof Map || value instanceof Set) {
+    return value.size;
+  }
+
+  if (Array.isArray(value)) {
+    return value.length;
+  }
+
+  if (value && typeof value === "object") {
+    return Object.keys(value as Record<string, unknown>).length;
+  }
+
+  return 0;
+};
+
+const estimateDiscoveredPeers = (torrent: TorrentLike, activePeers: number): number => {
+  const discovery = torrent?.discovery ?? torrent?._discovery;
+  const counts = [
+    activePeers,
+    Number(torrent?.numPeers ?? 0),
+    Number(torrent?._numPeers ?? 0),
+    collectionSize(torrent?._peers),
+    collectionSize(discovery?._peers),
+    collectionSize(discovery?.tracker?._peers),
+    collectionSize(discovery?.tracker?.client?._peers),
+  ].filter((value) => Number.isFinite(value) && value >= 0) as number[];
+
+  if (counts.length === 0) {
+    return activePeers;
+  }
+
+  return Math.max(...counts);
 };
 
 const updatePieceStatesInPlace = (torrent: TorrentLike, states: PieceState[]): PieceState[] => {
@@ -516,19 +644,25 @@ const computeProgress = (torrent: TorrentLike): DownloadProgress => {
   const downloadSpeed = Number(torrent?.downloadSpeed ?? 0);
   const uploadSpeed = Number(torrent?.uploadSpeed ?? 0);
   const progress = totalBytes > 0 ? (downloadedBytes / totalBytes) * 100 : 0;
+  const turboMode = getGlobalSettings().turboMode;
 
   const piecesTotal = Number(torrent?.pieces?.length ?? torrent?.numPieces ?? 0);
   let piecesCompleted = 0;
 
-  if (piecesTotal > 0 && torrent?.bitfield?.get) {
-    for (let index = 0; index < piecesTotal; index += 1) {
-      if (torrent.bitfield.get(index)) {
-        piecesCompleted += 1;
+  if (piecesTotal > 0) {
+    if (turboMode) {
+      piecesCompleted = Math.max(0, Math.min(piecesTotal, Math.floor((progress / 100) * piecesTotal)));
+    } else if (torrent?.bitfield?.get) {
+      for (let index = 0; index < piecesTotal; index += 1) {
+        if (torrent.bitfield.get(index)) {
+          piecesCompleted += 1;
+        }
       }
     }
   }
 
   const activePeers = Number(Array.isArray(torrent?.wires) ? torrent.wires.length : 0);
+  const discoveredPeers = Math.max(activePeers, estimateDiscoveredPeers(torrent, activePeers));
   const remaining = Math.max(0, totalBytes - downloadedBytes);
   const eta = downloadSpeed > 0 ? Math.round(remaining / downloadSpeed) : -1;
 
@@ -539,6 +673,7 @@ const computeProgress = (torrent: TorrentLike): DownloadProgress => {
     downloadSpeed,
     uploadSpeed,
     activePeers,
+    discoveredPeers,
     piecesCompleted,
     piecesTotal,
     eta,
@@ -549,6 +684,14 @@ const computeProgress = (torrent: TorrentLike): DownloadProgress => {
 
 const flushWireTelemetry = async (managedSession: ManagedSession) => {
   const telemetry = managedSession.wireTelemetry;
+
+  if (getGlobalSettings().turboMode) {
+    telemetry.receivedBlocks = 0;
+    telemetry.receivedBytes = 0;
+    telemetry.receivedPeers.clear();
+    telemetry.requestedBlocks = 0;
+    return;
+  }
 
   if (telemetry.receivedBlocks > 0) {
     const blocks = telemetry.receivedBlocks;
@@ -613,7 +756,8 @@ const tuneAdaptiveWebTorrent = async (managedSession: ManagedSession) => {
   }
 
   const now = Date.now();
-  if (now - (managedSession.lastAdaptiveTuneAt ?? 0) < 6000) {
+  const tuneIntervalMs = settings.turboMode ? 4500 : 6000;
+  if (now - (managedSession.lastAdaptiveTuneAt ?? 0) < tuneIntervalMs) {
     return;
   }
 
@@ -622,6 +766,8 @@ const tuneAdaptiveWebTorrent = async (managedSession: ManagedSession) => {
   const speedMbps = managedSession.progress.downloadSpeed / (1024 * 1024);
   const peers = managedSession.progress.activePeers;
   const progress = managedSession.progress.progress;
+  const sparseSwarm = peers > 0 && peers < 20;
+  const verySparseSwarm = peers > 0 && peers < 10;
 
   let targetMaxRequests = 24;
   if (speedMbps < 1.5) {
@@ -638,10 +784,16 @@ const tuneAdaptiveWebTorrent = async (managedSession: ManagedSession) => {
     targetMaxRequests += 6;
   }
 
-  targetMaxRequests = Math.max(10, Math.min(64, targetMaxRequests));
+  if (sparseSwarm) {
+    targetMaxRequests = Math.max(targetMaxRequests, verySparseSwarm ? 62 : 54);
+  }
+
+  // Respect hard safety guard caps if enabled.
+  const maxRequestsCap = DISK_SAFETY_GUARD.enabled ? DISK_SAFETY_GUARD.maxRequestsPerPeer : 64;
+  targetMaxRequests = Math.max(10, Math.min(maxRequestsCap, targetMaxRequests));
 
   const targetStrategy: "sequential" | "random" | "rarest-first" =
-    progress < 12 && speedMbps < 4 ? "sequential" : "rarest-first";
+    sparseSwarm || speedMbps < 1.5 || (progress < 20 && speedMbps < 4) ? "sequential" : "rarest-first";
 
   const torrentRef = managedSession.torrent as any;
   let changed = false;
@@ -682,24 +834,32 @@ const updateManagedSessionSnapshot = async (managedSession: ManagedSession) => {
   const prevDownloadedBytes = managedSession.progress?.downloadedBytes ?? 0;
   const prevActivePeers = managedSession.progress?.activePeers ?? 0;
   const now = Date.now();
-
-  const previousCompleted = new Set(managedSession.session.completedPieces ?? []);
+  const turboMode = getGlobalSettings().turboMode;
 
   managedSession.progress = computeProgress(torrent);
-  managedSession.pieceStates = updatePieceStatesInPlace(torrent, managedSession.pieceStates);
 
-  const turboMode = getGlobalSettings().turboMode;
-  const peerRefreshIntervalMs = turboMode
+  const previousCompleted = turboMode ? null : new Set(managedSession.session.completedPieces ?? []);
+  const pieceRefreshIntervalMs = turboMode
     ? managedSession.progress.activePeers > 0
-      ? 5000
-      : 2000
-    : managedSession.progress.activePeers > 0
-      ? 3000
-      : 1000;
+      ? 12000
+      : 5000
+    : 1000;
+  const shouldRefreshPieceStates =
+    managedSession.pieceStates.length === 0 ||
+    managedSession.progress.progress >= 100 ||
+    now - (managedSession.lastPieceStateRefreshAt ?? 0) >= pieceRefreshIntervalMs;
+
+  if (shouldRefreshPieceStates) {
+    managedSession.pieceStates = updatePieceStatesInPlace(torrent, managedSession.pieceStates);
+    managedSession.lastPieceStateRefreshAt = now;
+  }
+
+  const peerRefreshIntervalMs = managedSession.progress.activePeers > 0 ? 3000 : 1000;
   const shouldRefreshPeerStates =
-    managedSession.peerStates.length === 0 ||
-    managedSession.progress.activePeers !== prevActivePeers ||
-    now - (managedSession.lastPeerStateRefreshAt ?? 0) >= peerRefreshIntervalMs;
+    !turboMode &&
+    (managedSession.peerStates.length === 0 ||
+      managedSession.progress.activePeers !== prevActivePeers ||
+      now - (managedSession.lastPeerStateRefreshAt ?? 0) >= peerRefreshIntervalMs);
 
   if (shouldRefreshPeerStates) {
     managedSession.peerStates = updatePeerStatesInPlace(torrent, managedSession.peerStates);
@@ -711,11 +871,21 @@ const updateManagedSessionSnapshot = async (managedSession: ManagedSession) => {
   managedSession.session.progress = managedSession.progress.progress;
   managedSession.session.peers = getPeersFromTorrent(torrent);
   managedSession.session.pieceCount = managedSession.progress.piecesTotal;
-  managedSession.session.completedPieces = managedSession.pieceStates
-    .filter((piece) => piece.completed)
-    .map((piece) => piece.index);
 
-  const newlyVerifiedPieces = managedSession.session.completedPieces.filter((pieceIndex) => !previousCompleted.has(pieceIndex));
+  if (shouldRefreshPieceStates) {
+    managedSession.session.completedPieces = managedSession.pieceStates
+      .filter((piece) => piece.completed)
+      .map((piece) => piece.index);
+  } else if (managedSession.progress.progress >= 100) {
+    managedSession.session.completedPieces = Array.from(
+      { length: managedSession.progress.piecesTotal },
+      (_, pieceIndex) => pieceIndex
+    );
+  }
+
+  const newlyVerifiedPieces = previousCompleted
+    ? managedSession.session.completedPieces.filter((pieceIndex) => !previousCompleted.has(pieceIndex))
+    : [];
 
   // Only sync to disk every 5 seconds to reduce brutal lag, OR if it hits 100%.
   const shouldSync = (now - (managedSession.session.updatedAt ?? 0) > 5000) || managedSession.progress.progress === 100;
@@ -757,6 +927,20 @@ const updateManagedSessionSnapshot = async (managedSession: ManagedSession) => {
         },
       });
     }
+  }
+
+  const isTransferStalled = managedSession.progress.downloadedBytes <= prevDownloadedBytes;
+  const lowThroughput = managedSession.progress.downloadSpeed < 220 * 1024;
+  const shouldKickTrackerRecovery =
+    managedSession.session.status === "running" &&
+    managedSession.progress.progress < 100 &&
+    lowThroughput &&
+    isTransferStalled &&
+    now - (managedSession.lastReannounceAt ?? 0) >= 20000;
+
+  if (shouldKickTrackerRecovery) {
+    managedSession.lastReannounceAt = now;
+    void triggerTrackerReannounce(managedSession, "manual");
   }
 
   await flushWireTelemetry(managedSession);
@@ -872,7 +1056,6 @@ const bindTorrentEvents = (managedSession: ManagedSession) => {
   }
 
   const sessionId = managedSession.session.sessionId;
-  const turboMode = getGlobalSettings().turboMode;
 
   const getReannounceIntervalMs = () => {
     const configuredSeconds = Number(getGlobalSettings().trackerAnnounceInterval ?? 30);
@@ -923,15 +1106,15 @@ const bindTorrentEvents = (managedSession: ManagedSession) => {
       });
     };
 
-    fire("peer_handshake", {
-      ip: address.ip,
-      port: resolvedPort,
-      peerId: wire?.peerId,
-      peerLabel,
-      transport: "tcp",
-    });
+    if (!getGlobalSettings().turboMode) {
+      fire("peer_handshake", {
+        ip: address.ip,
+        port: resolvedPort,
+        peerId: wire?.peerId,
+        peerLabel,
+        transport: "tcp",
+      });
 
-    if (!turboMode) {
       const peerPieces = wire?.peerPieces;
       let piecesAvailable: number | null = null;
       if (Array.isArray(peerPieces)) {
@@ -982,12 +1165,18 @@ const bindTorrentEvents = (managedSession: ManagedSession) => {
       void pieceIndex;
       void offset;
       void length;
+      if (getGlobalSettings().turboMode) {
+        return;
+      }
       managedSession.wireTelemetry.requestedBlocks += 1;
     });
 
     wire.on("piece", (pieceIndex: number, offset: number, buffer: Buffer) => {
       void pieceIndex;
       void offset;
+      if (getGlobalSettings().turboMode) {
+        return;
+      }
       managedSession.wireTelemetry.receivedBlocks += 1;
       managedSession.wireTelemetry.receivedBytes += Number(buffer?.length ?? 0);
       managedSession.wireTelemetry.receivedPeers.add(`${address.ip}:${resolvedPort}`);
@@ -1078,7 +1267,8 @@ const attachTorrentToManagedSession = async (managedSession: ManagedSession, fal
   ensureSessionStorage(storage);
 
   const settings = getGlobalSettings();
-  const announcePool = getTrackerPool();
+  const sourceTrackers = extractTrackersFromSource(managedSession.source, managedSession.sourceType);
+  const announcePool = getTrackerPool(sourceTrackers);
   const sessionId = managedSession.session.sessionId;
 
   const clientRef = client as any;
@@ -1128,13 +1318,23 @@ const attachTorrentToManagedSession = async (managedSession: ManagedSession, fal
       `[SafetyGuard] ${sessionId}: download<=${effectiveDownloadLimitKb}KB/s peers<=${effectiveMaxPeers} maxReq<=${normalizedMaxRequests}`
     );
   }
+
+  const enableDht = settings.enableDHT !== false;
+  const rawNumwant = Number(settings.trackerNumwant ?? 250);
+  const trackerNumwant = Number.isFinite(rawNumwant)
+    ? Math.max(20, Math.min(500, Math.floor(rawNumwant)))
+    : 250;
   
   const torrent = client.add(managedSession.source, {
     path: storage.sessionDir,
     announce: announcePool,
     destroyStoreOnDestroy: false,
+    dht: enableDht,
     // Apply user settings to this torrent
     maxRequests: normalizedMaxRequests,
+    getAnnounceOpts: () => ({
+      numwant: trackerNumwant,
+    }),
   });
 
   managedSession.adaptiveMaxRequests = normalizedMaxRequests;
@@ -1165,6 +1365,10 @@ const attachTorrentToManagedSession = async (managedSession: ManagedSession, fal
   } else {
     logger.info(`[Torrent: ${sessionId}] Trackers used: DHT only`);
   }
+
+  logger.info(
+    `[Torrent: ${sessionId}] Discovery config: dht=${enableDht ? "on" : "off"} numwant=${trackerNumwant} sourceTrackers=${sourceTrackers.length}`
+  );
 
   writeDownloadMetadata(storage, {
     sessionId: managedSession.session.sessionId,
@@ -1363,6 +1567,7 @@ export const startTorrent = async (options: StartTorrentOptions) => {
       downloadSpeed: 0,
       uploadSpeed: 0,
       activePeers: 0,
+      discoveredPeers: 0,
       piecesCompleted: 0,
       piecesTotal: 0,
       eta: -1,
@@ -1805,6 +2010,11 @@ export const setSeedingEnabled = async (sessionId: string, enabled: boolean): Pr
     return false;
   }
 
+  if (enabled && getGlobalSettings().turboMode) {
+    logger.info(`[Seeding] Blocked enable for ${sessionId} because Turbo Mode is active`);
+    return false;
+  }
+
   try {
     managedSession.session.seeding = enabled;
     managedSession.session.updatedAt = Date.now();
@@ -1829,6 +2039,46 @@ export const setSeedingEnabled = async (sessionId: string, enabled: boolean): Pr
     });
     return false;
   }
+};
+
+export const enforceTurboModeSeedingPolicy = async (): Promise<number> => {
+  if (!getGlobalSettings().turboMode) {
+    return 0;
+  }
+
+  let disabledSessions = 0;
+
+  for (const [sessionId, session] of sessions.entries()) {
+    if (!session.seeding) {
+      continue;
+    }
+
+    const managedSession = managed.get(sessionId);
+    const updatedAt = Date.now();
+
+    session.seeding = false;
+    session.updatedAt = updatedAt;
+
+    if (managedSession) {
+      managedSession.session.seeding = false;
+      managedSession.session.updatedAt = updatedAt;
+    }
+
+    await syncSession(session);
+
+    await emitEvent({
+      type: "torrent_seeding_stopped",
+      sessionId,
+      data: {
+        seeding: false,
+        reason: "turbo_mode_policy",
+      },
+    });
+
+    disabledSessions += 1;
+  }
+
+  return disabledSessions;
 };
 
 type AutoResumeSummary = {
@@ -1938,3 +2188,4 @@ export const restorePersistedTorrentsOnBoot = async (): Promise<AutoResumeSummar
 
   return summary;
 };
+

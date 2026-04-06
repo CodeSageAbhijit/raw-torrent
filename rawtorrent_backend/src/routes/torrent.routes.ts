@@ -21,6 +21,7 @@ import {
   getTorrentStatus,
   reannounceTorrentDiscovery,
   setSeedingEnabled,
+  enforceTurboModeSeedingPolicy,
 } from "../services/torrentService";
 import { getGlobalSettings, setGlobalSettings } from "../settings";
 
@@ -68,14 +69,33 @@ router.get("/settings", (req, res) => {
   }
 });
 
-router.post("/settings", (req, res) => {
+router.post("/settings", async (req, res) => {
   try {
     const body = req.body ?? {};
+    const previousTurboMode = getGlobalSettings().turboMode;
     const updatedSettings = setGlobalSettings(body);
+
+    let seedingDisabled = 0;
+    if (updatedSettings.turboMode) {
+      seedingDisabled = await enforceTurboModeSeedingPolicy();
+    }
+
+    const turboActivated = !previousTurboMode && updatedSettings.turboMode;
+    const turboPolicyMessage = updatedSettings.turboMode
+      ? seedingDisabled > 0
+        ? ` Turbo Mode policy disabled seeding for ${seedingDisabled} session(s).`
+        : turboActivated
+          ? " Turbo Mode policy is active."
+          : ""
+      : "";
+
     res.json({
       success: true,
       data: updatedSettings,
-      message: "Settings updated. New downloads will use these settings immediately.",
+      message: `Settings updated. New downloads will use these settings immediately.${turboPolicyMessage}`,
+      metadata: {
+        seedingDisabled,
+      },
     });
   } catch (error) {
     console.error("Failed to update settings:", error);
@@ -232,6 +252,7 @@ router.get("/sessions/:sessionId/progress", async (req, res, next) => {
         downloadSpeed: 0,
         uploadSpeed: 0,
         activePeers: session.peers.length,
+        discoveredPeers: session.peers.length,
         piecesCompleted: session.completedPieces.length,
         piecesTotal: session.pieceCount,
         eta: -1,
@@ -576,6 +597,15 @@ router.post("/sessions/:sessionId/seeding", async (req, res, next) => {
 
     if (false) {
       res.status(403).json({ success: false, error: "Forbidden" });
+      return;
+    }
+
+    if (enabled === true && getGlobalSettings().turboMode) {
+      res.status(400).json({
+        success: false,
+        error: "Seeding is disabled while Turbo Mode is active. Disable Turbo Mode first.",
+        turboMode: true,
+      });
       return;
     }
 

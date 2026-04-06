@@ -19,6 +19,11 @@ type SessionPayload = {
   status: "idle" | "starting" | "running" | "paused" | "completed" | "error";
 };
 
+type RuntimeSettings = {
+  turboMode?: boolean;
+  [key: string]: unknown;
+};
+
 type DownloadProgress = {
   totalBytes: number;
   downloadedBytes: number;
@@ -26,6 +31,7 @@ type DownloadProgress = {
   downloadSpeed: number;
   uploadSpeed: number;
   activePeers: number;
+  discoveredPeers: number;
   piecesCompleted: number;
   piecesTotal: number;
   eta: number;
@@ -355,11 +361,12 @@ export default function TorrentSessionView({
   const [eventLimit, setEventLimit] = useState(60);
   const [selectedEventId, setSelectedEventId] = useState<string>("");
   const [selectedPeerId, setSelectedPeerId] = useState<string>("");
+  const [isTurboMode, setIsTurboMode] = useState(false);
+  const [isTurboTogglePending, setIsTurboTogglePending] = useState(false);
   const [hasAutoSwitchedSession, setHasAutoSwitchedSession] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
   const [showSeedingModal, setShowSeedingModal] = useState(false);
   const [isSeedingTogglePending, setIsSeedingTogglePending] = useState(false);
-  const [isReannouncePending, setIsReannouncePending] = useState(false);
   const blockBatchRef = useRef<{ blocks: number; bytes: number; peers: Set<string> }>({
     blocks: 0,
     bytes: 0,
@@ -386,6 +393,36 @@ export default function TorrentSessionView({
     setAuthToken("local-bypass");
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadRuntimeSettings = async () => {
+      try {
+        const response = await fetch("/api/settings", { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as RuntimeSettings;
+        if (!cancelled && typeof payload.turboMode === "boolean") {
+          setIsTurboMode(payload.turboMode);
+        }
+      } catch {
+        // no-op
+      }
+    };
+
+    void loadRuntimeSettings();
+    const refreshTimer = setInterval(() => {
+      void loadRuntimeSettings();
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(refreshTimer);
+    };
+  }, []);
+
   const fetchProgress = useCallback(async () => {
     if (!authToken) return;
     try {
@@ -401,7 +438,7 @@ export default function TorrentSessionView({
   }, [sessionId, authToken]);
 
   const fetchPeers = useCallback(async () => {
-    if (!authToken) return;
+    if (!authToken || isTurboMode) return;
     try {
       const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions/${sessionId}/peers`, {
         headers: { Authorization: `Bearer ${authToken}` },
@@ -412,10 +449,10 @@ export default function TorrentSessionView({
     } catch {
       // no-op
     }
-  }, [sessionId, authToken]);
+  }, [sessionId, authToken, isTurboMode]);
 
   const fetchPieces = useCallback(async () => {
-    if (!authToken) return;
+    if (!authToken || isTurboMode) return;
     try {
       const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions/${sessionId}/pieces`, {
         headers: { Authorization: `Bearer ${authToken}` },
@@ -426,13 +463,19 @@ export default function TorrentSessionView({
     } catch {
       // no-op
     }
-  }, [sessionId, authToken]);
+  }, [sessionId, authToken, isTurboMode]);
 
   const hydrateInitialMetrics = useCallback(async () => {
     if (!authToken) return;
+    if (isTurboMode) {
+      await fetchProgress();
+      setIsMetricsHydrated(true);
+      return;
+    }
+
     await Promise.all([fetchProgress(), fetchPeers(), fetchPieces()]);
     setIsMetricsHydrated(true);
-  }, [authToken, fetchProgress, fetchPeers, fetchPieces]);
+  }, [authToken, fetchProgress, fetchPeers, fetchPieces, isTurboMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -491,19 +534,19 @@ export default function TorrentSessionView({
 
     void hydrateInitialMetrics();
 
-    const progressTimer = setInterval(fetchProgress, 1500);
-    const peerTimer = setInterval(fetchPeers, 3500);
-    const pieceTimer = setInterval(fetchPieces, 4500);
+    const progressTimer = setInterval(fetchProgress, isTurboMode ? 2000 : 1500);
+    const peerTimer = isTurboMode ? null : setInterval(fetchPeers, 3500);
+    const pieceTimer = isTurboMode ? null : setInterval(fetchPieces, 4500);
 
     return () => {
       clearInterval(progressTimer);
-      clearInterval(peerTimer);
-      clearInterval(pieceTimer);
+      if (peerTimer) clearInterval(peerTimer);
+      if (pieceTimer) clearInterval(pieceTimer);
     };
-  }, [authToken, fetchProgress, fetchPeers, fetchPieces, hydrateInitialMetrics]);
+  }, [authToken, fetchProgress, fetchPeers, fetchPieces, hydrateInitialMetrics, isTurboMode]);
 
   useEffect(() => {
-    if (!authToken || !session || hasAutoSwitchedSession) return;
+    if (!authToken || !session || hasAutoSwitchedSession || isTurboMode) return;
 
     const currentProgress = downloadProgress?.progress ?? session.progress ?? 0;
     const noPeerActivity = peerStates.length === 0;
@@ -548,10 +591,10 @@ export default function TorrentSessionView({
     return () => {
       cancelled = true;
     };
-  }, [authToken, session, downloadProgress?.progress, peerStates.length, hasAutoSwitchedSession, router]);
+  }, [authToken, session, downloadProgress?.progress, peerStates.length, hasAutoSwitchedSession, router, isTurboMode]);
 
   useEffect(() => {
-    if (!authToken) return;
+    if (!authToken || isTurboMode) return;
 
     const socket = new WebSocket(`${getBackendWsUrl()}/ws`);
 
@@ -665,17 +708,17 @@ export default function TorrentSessionView({
 
       socket.close();
     };
-  }, [authToken, sessionId, fetchPeers, fetchPieces, pushEventLine]);
+  }, [authToken, sessionId, fetchPeers, fetchPieces, pushEventLine, isTurboMode]);
 
   const isRunning = session?.status === "running";
   const progress = downloadProgress?.progress ?? session?.progress ?? 0;
   const isComplete = session?.status === "completed" || progress >= 99.9;
-  const isInitialLoading = !isSessionHydrated || !isMetricsHydrated || (!session && !error);
-  const noPeersDetected =
-    !isInitialLoading &&
-    !isComplete &&
-    progress <= 0.1 &&
-    (downloadProgress?.activePeers ?? 0) === 0;
+  const hasDownloadStarted =
+    (downloadProgress?.downloadedBytes ?? 0) > 0 ||
+    (downloadProgress?.activePeers ?? 0) > 0 ||
+    peerStates.some((peer) => peer.downloadedBytes > 0 || peer.pendingRequests > 0) ||
+    (session?.progress ?? 0) > 0;
+  const isInitialLoading = !isSessionHydrated || !isMetricsHydrated || (!isComplete && !hasDownloadStarted);
   const fileName = session?.fileName ?? `Session ${sessionId}`;
   const pieceTotal = downloadProgress?.piecesTotal ?? session?.pieceCount ?? pieces.length;
   const totalBytes = downloadProgress?.totalBytes ?? 0;
@@ -685,8 +728,11 @@ export default function TorrentSessionView({
   const completedMbLabel = formatMegabytes(downloadedBytes);
   const totalMbLabel = totalBytes > 0 ? formatMegabytes(totalBytes) : "-- MB";
   const etaLabel = formatEtaLabel(downloadProgress?.eta ?? -1, isComplete);
+  const activePeerCount = downloadProgress?.activePeers ?? 0;
+  const discoveredPeerCount = Math.max(activePeerCount, downloadProgress?.discoveredPeers ?? 0);
 
   const mappedPeers = useMemo<PeerDownloadState[]>(() => {
+    if (isTurboMode) return [];
     if (peerStates.length > 0) return peerStates;
     return (
       session?.peers.map((peer) => ({
@@ -701,9 +747,10 @@ export default function TorrentSessionView({
         encryption: "unknown",
       })) ?? []
     );
-  }, [peerStates, session?.peers]);
+  }, [peerStates, session?.peers, isTurboMode]);
 
   const uniquePeers = useMemo<PeerDownloadState[]>(() => {
+    if (isTurboMode) return [];
     const byAddress = new Map<string, PeerDownloadState>();
 
     for (const peer of mappedPeers) {
@@ -728,7 +775,7 @@ export default function TorrentSessionView({
     }
 
     return Array.from(byAddress.values());
-  }, [mappedPeers]);
+  }, [mappedPeers, isTurboMode]);
 
   useEffect(() => {
     if (!session) {
@@ -767,6 +814,7 @@ export default function TorrentSessionView({
   }, [uniquePeers]);
 
   const recentByPeer = useMemo(() => {
+    if (isTurboMode) return new Map<string, number>();
     const recent = eventLines.slice(-240);
     const stages = new Map<string, number>();
 
@@ -780,9 +828,10 @@ export default function TorrentSessionView({
     }
 
     return stages;
-  }, [eventLines]);
+  }, [eventLines, isTurboMode]);
 
   const graphPeers = useMemo<GraphPeer[]>(() => {
+    if (isTurboMode) return [];
     return uniquePeers.slice(0, 120).map((peer) => {
       const addressKey = peerAddressKey(peer);
       const eventStage = (peer.peerId ? recentByPeer.get(peer.peerId) : undefined) ?? recentByPeer.get(addressKey);
@@ -799,7 +848,7 @@ export default function TorrentSessionView({
         piecesAvailable: peer.piecesAvailable,
       };
     });
-  }, [uniquePeers, recentByPeer]);
+  }, [uniquePeers, recentByPeer, isTurboMode]);
 
   const peersTable = useMemo(
     () => [...uniquePeers].sort((a, b) => b.downloadedBytes - a.downloadedBytes),
@@ -865,6 +914,7 @@ export default function TorrentSessionView({
   }, [eventLines]);
 
   const displayEvents = useMemo(() => {
+    if (isTurboMode) return [] as EventLine[];
     const source = eventStreamPaused ? pausedEventLines : eventLines;
     const query = eventSearchText.trim().toLowerCase();
     let verifiedCounter = 0;
@@ -890,7 +940,7 @@ export default function TorrentSessionView({
     });
 
     return filtered.slice(-eventLimit);
-  }, [eventLines, pausedEventLines, eventStreamPaused, eventSearchText, eventPhaseFilter, eventMode, eventLimit]);
+  }, [eventLines, pausedEventLines, eventStreamPaused, eventSearchText, eventPhaseFilter, eventMode, eventLimit, isTurboMode]);
 
   const selectedEvent = useMemo(
     () => displayEvents.find((line) => line.id === selectedEventId) ?? null,
@@ -988,44 +1038,63 @@ export default function TorrentSessionView({
     }
   };
 
-  const handleReannounceTrackers = async () => {
-    if (!authToken || !session || isReannouncePending) {
+  const handleToggleTurboMode = async () => {
+    if (isTurboTogglePending) {
       return;
     }
 
-    setIsReannouncePending(true);
+    const targetTurboMode = !isTurboMode;
+    setIsTurboTogglePending(true);
+    setError(null);
 
     try {
-      const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions/${sessionId}/reannounce`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
-      });
-
-      const payload = (await response.json()) as {
-        success: boolean;
-        error?: string;
-      };
-
-      if (!response.ok || !payload.success) {
-        throw new Error(payload.error ?? "Unable to refresh tracker discovery");
+      const currentResponse = await fetch("/api/settings", { cache: "no-store" });
+      if (!currentResponse.ok) {
+        throw new Error("Unable to load current runtime settings");
       }
 
-      pushEventLine({
-        id: `reannounce-${Date.now()}`,
-        timestamp: Date.now(),
-        type: "tracker_reannounce",
-        phase: "discovery",
-        level: "normal",
-        summary: "Tracker refresh triggered. Looking for peers again.",
+      const currentSettings = (await currentResponse.json()) as RuntimeSettings;
+
+      const updateResponse = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...currentSettings,
+          turboMode: targetTurboMode,
+        }),
       });
 
-      void fetchPeers();
+      const updatePayload = (await updateResponse.json()) as {
+        success?: boolean;
+        error?: string;
+        updatedSettings?: RuntimeSettings;
+      };
+
+      if (!updateResponse.ok || updatePayload.success === false) {
+        throw new Error(updatePayload.error ?? "Unable to update Turbo Mode");
+      }
+
+      const appliedTurboMode =
+        typeof updatePayload.updatedSettings?.turboMode === "boolean"
+          ? updatePayload.updatedSettings.turboMode
+          : targetTurboMode;
+
+      setIsTurboMode(appliedTurboMode);
+
+      pushEventLine({
+        id: `turbo-${appliedTurboMode ? "enabled" : "disabled"}-${Date.now()}`,
+        timestamp: Date.now(),
+        type: appliedTurboMode ? "turbo_mode_enabled" : "turbo_mode_disabled",
+        phase: "system",
+        level: "normal",
+        summary: appliedTurboMode
+          ? "Turbo mode enabled. Session switched to download-priority runtime."
+          : "Turbo mode disabled. Full analytics runtime restored.",
+      });
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? caughtError.message : "Unable to refresh tracker discovery");
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to update Turbo Mode");
     } finally {
-      setIsReannouncePending(false);
+      setIsTurboTogglePending(false);
     }
   };
 
@@ -1035,8 +1104,10 @@ export default function TorrentSessionView({
 
     setSession((current) => (current ? { ...current, status: "completed", progress: 100 } : current));
     void fetchProgress();
-    void fetchPieces();
-    void fetchPeers();
+    if (!isTurboMode) {
+      void fetchPieces();
+      void fetchPeers();
+    }
 
     pushEventLine({
       id: `completion-${Date.now()}`,
@@ -1046,7 +1117,7 @@ export default function TorrentSessionView({
       level: "normal",
       summary: "Download complete. File is ready for local download.",
     });
-  }, [isComplete, completionNotified, fetchProgress, fetchPieces, fetchPeers, pushEventLine]);
+  }, [isComplete, completionNotified, fetchProgress, fetchPieces, fetchPeers, pushEventLine, isTurboMode]);
 
   const handleDownloadCompletedFile = () => {
     if (!session) return;
@@ -1094,7 +1165,7 @@ export default function TorrentSessionView({
                 )}
               </span>
               <span className="text-xs font-bold text-primary uppercase tracking-wider font-mono">
-                {isRunning && !isComplete ? "Live Analytics" : isComplete ? "Completed" : session?.status ?? "Paused"}
+                {isComplete ? "Completed" : isTurboMode ? "Turbo Download Mode" : isRunning ? "Live Analytics" : session?.status ?? "Paused"}
               </span>
             </div>
             <h1 className="text-3xl font-bold tracking-tight">{fileName}</h1>
@@ -1103,6 +1174,35 @@ export default function TorrentSessionView({
               <span className="w-1 h-1 rounded-full bg-foreground/20" />
               <span>{formatBytes(downloadProgress?.totalBytes ?? 0)}</span>
             </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <span
+              className={`text-[11px] font-semibold px-2 py-1 rounded-md border ${
+                isTurboMode
+                  ? "border-primary/60 text-primary bg-primary/15"
+                  : "border-foreground/20 text-foreground/60"
+              }`}
+            >
+              {isTurboMode ? "TURBO ON" : "TURBO OFF"}
+            </span>
+            <button
+              type="button"
+              onClick={handleToggleTurboMode}
+              disabled={isTurboTogglePending}
+              className={`turbo-cta rounded-md px-4 py-2 text-sm font-semibold transition-colors disabled:opacity-60 ${
+                isTurboMode ? "turbo-cta-on" : "turbo-cta-off"
+              }`}
+            >
+              <span className="inline-flex items-center gap-2">
+                <span className={`turbo-dot ${isTurboMode ? "turbo-dot-on" : ""}`} />
+                {isTurboTogglePending
+                  ? "Switching..."
+                  : isTurboMode
+                    ? "Disable Turbo"
+                    : "Enable Turbo"}
+              </span>
+            </button>
           </div>
         </header>
 
@@ -1126,31 +1226,22 @@ export default function TorrentSessionView({
 
         {error && <p className="text-sm text-destructive font-medium">{error}</p>}
 
-        {noPeersDetected && (
-          <section className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 animate-fade-in-up">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">No peers discovered yet</p>
-                <p className="text-xs font-mono text-foreground/65 mt-1">
-                  Download starts only after peers are found. This can happen with slow trackers or network DNS timeouts.
-                </p>
-              </div>
-              <button
-                onClick={handleReannounceTrackers}
-                disabled={isReannouncePending}
-                className="rounded-md border border-amber-500/50 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-500/15 disabled:opacity-60 dark:text-amber-300"
-              >
-                {isReannouncePending ? "Refreshing trackers..." : "Retry Peer Discovery"}
-              </button>
-            </div>
-          </section>
-        )}
-
         {isInitialLoading ? (
           <InitialTorrentSkeleton />
         ) : (
           <>
+        {isTurboMode && (
+          <section className="rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 animate-fade-in-up">
+            <p className="text-sm font-semibold text-primary">Turbo Mode is active</p>
+            <p className="text-xs font-mono text-foreground/65 mt-1">
+              Non-essential analytics are hidden to keep resources focused on piece transfer and disk writes.
+            </p>
+          </section>
+        )}
+
         <section className="animate-fade-in-up delay-100 grid gap-4 grid-cols-2 lg:grid-cols-6">
+          {!isTurboMode && (
+            <>
           <div className="col-span-2 rounded-xl border bg-card p-5 relative overflow-hidden">
             <div className="absolute right-0 bottom-0 p-3 opacity-5 pointer-events-none">
               <svg className="w-20 h-20" fill="currentColor" viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
@@ -1175,10 +1266,12 @@ export default function TorrentSessionView({
               avg {swarmPressure.avgPending.toFixed(1)} req/peer • {swarmPressure.activeWithRequests} active requesters
             </p>
           </div>
+            </>
+          )}
 
-          <div className="col-span-3 rounded-xl border bg-card p-5 flex flex-col justify-center">
+          <div className={`${isTurboMode ? "col-span-2 lg:col-span-6" : "col-span-3"} rounded-xl border bg-card p-5 flex flex-col justify-center`}>
             <div className="flex justify-between items-end mb-2">
-              <p className="text-xs font-bold text-foreground/50 uppercase tracking-wider font-mono">Real-time Transfer</p>
+              <p className="text-xs font-bold text-foreground/50 uppercase tracking-wider font-mono">{isTurboMode ? "Download Transfer" : "Real-time Transfer"}</p>
               <div className="flex items-center gap-3">
                 {!isComplete && (
                   <button
@@ -1213,6 +1306,7 @@ export default function TorrentSessionView({
               <div className={`h-full rounded-full bg-primary transition-all duration-300 ${isRunning ? "progress-animated" : ""}`} style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} />
             </div>
             <div className="flex items-center justify-between mt-2.5 gap-3">
+              {!isTurboMode ? (
               <div className="flex items-center gap-1.5">
                 <span className="text-xs font-medium text-foreground/70">Seeding</span>
                 <button
@@ -1238,17 +1332,23 @@ export default function TorrentSessionView({
                   </div>
                 </button>
               </div>
+              ) : (
+                <p className="text-xs font-mono text-foreground/55">Turbo prioritizes download path only.</p>
+              )}
               <div className="text-right space-y-0.5">
                 <p className="text-xs font-mono font-medium text-foreground/50">{progress.toFixed(1)}% Completed</p>
                 <p className="text-[11px] font-mono text-foreground/55">
                   {completedMbLabel} / {totalMbLabel}
                 </p>
                 <p className="text-[11px] font-mono text-foreground/55">ETA {etaLabel}</p>
+                <p className="text-[11px] font-mono text-foreground/55">Peers {activePeerCount} active / {discoveredPeerCount} discovered</p>
               </div>
             </div>
           </div>
         </section>
 
+        {!isTurboMode && (
+          <>
         <section className="animate-fade-in-up delay-175">
           <PieceGrid pieces={pieces} totalPieces={pieceTotal} maxDisplay={420} tileSizePx={11} fullScreenHref={`/torrent/${sessionId}/pieces`} />
         </section>
@@ -1562,6 +1662,8 @@ export default function TorrentSessionView({
             </div>
           </section>
         </div>
+          </>
+        )}
           </>
         )}
 

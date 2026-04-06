@@ -19,6 +19,12 @@ interface PieceGridProps {
   tileSizePx?: number;
 }
 
+const formatPieceMb = (bytes: number): string => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "unknown";
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MB`;
+};
+
 export default function PieceGrid({ pieces, totalPieces, maxDisplay = 500, fullScreenHref, tileSizePx = 8 }: PieceGridProps) {
   const displayPieces = useMemo(() => {
     // If more pieces than we can display, sample them
@@ -60,6 +66,25 @@ export default function PieceGrid({ pieces, totalPieces, maxDisplay = 500, fullS
     return { completedCount: completed, requestedCount: requested };
   }, [pieces]);
 
+  const pieceSizeLabel = useMemo(() => {
+    const lengths = pieces
+      .map((piece) => piece.length)
+      .filter((length) => Number.isFinite(length) && length > 0);
+
+    if (lengths.length === 0) {
+      return null;
+    }
+
+    const minLength = Math.min(...lengths);
+    const maxLength = Math.max(...lengths);
+
+    if (minLength === maxLength) {
+      return `Piece size ${formatPieceMb(minLength)}`;
+    }
+
+    return `Piece size ${formatPieceMb(minLength)} - ${formatPieceMb(maxLength)}`;
+  }, [pieces]);
+
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="flex items-center justify-between mb-4">
@@ -69,7 +94,7 @@ export default function PieceGrid({ pieces, totalPieces, maxDisplay = 500, fullS
             Piece Map
           </h3>
         </div>
-        <div className="flex items-center gap-4 text-xs font-mono">
+        <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
           <span className="flex items-center gap-1.5">
             <span className="w-3 h-3 rounded-sm bg-primary" />
             Complete ({completedCount})
@@ -82,6 +107,7 @@ export default function PieceGrid({ pieces, totalPieces, maxDisplay = 500, fullS
             <span className="w-3 h-3 rounded-sm bg-secondary" />
             Pending ({totalPieces - completedCount - requestedCount})
           </span>
+          {pieceSizeLabel && <span className="text-foreground/60">{pieceSizeLabel}</span>}
           {fullScreenHref && (
             <Link
               href={fullScreenHref}
@@ -115,7 +141,7 @@ export default function PieceGrid({ pieces, totalPieces, maxDisplay = 500, fullS
                   : "bg-secondary"
               }
             `}
-            title={`Piece ${piece.index}: ${piece.completed ? "Complete" : piece.requested ? "Downloading" : "Pending"}`}
+            title={`Piece ${piece.index}: ${piece.completed ? "Complete" : piece.requested ? "Downloading" : "Pending"} | ${formatPieceMb(piece.length)}`}
           />
         ))}
       </div>

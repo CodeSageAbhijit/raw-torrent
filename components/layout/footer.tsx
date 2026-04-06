@@ -18,7 +18,7 @@ export function Footer() {
           </div>
           <div className="hidden sm:block w-px h-5 bg-foreground/20" />
           <Link
-            href="https://github.com/CodeSageAbhijit/rawtorrent"
+            href="https://github.com/CodeSageAbhijit/raw-torrent"
             target="_blank"
             className="flex items-center gap-2 text-foreground/60 hover:text-foreground transition-colors duration-200 font-medium"
             rel="noreferrer"

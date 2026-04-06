@@ -143,6 +143,193 @@ button:active {
   transform: scale(0.96);
 }
 
+@keyframes turboGradient {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes turboHalo {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgba(239, 68, 68, 0);
+  }
+}
+
+@keyframes turboShine {
+  0% {
+    transform: translateX(-140%) skewX(-18deg);
+  }
+  100% {
+    transform: translateX(220%) skewX(-18deg);
+  }
+}
+
+@keyframes turboSpeedLines {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 56px 0;
+  }
+}
+
+@keyframes turboFlicker {
+  0%,
+  100% {
+    filter: brightness(1) saturate(1);
+  }
+  32% {
+    filter: brightness(1.08) saturate(1.22);
+  }
+  33% {
+    filter: brightness(0.96) saturate(0.92);
+  }
+  64% {
+    filter: brightness(1.12) saturate(1.34);
+  }
+}
+
+@keyframes turboDotPulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(253, 230, 138, 0.55);
+  }
+  50% {
+    transform: scale(1.25);
+    box-shadow: 0 0 0 8px rgba(253, 230, 138, 0);
+  }
+}
+
+.turbo-cta {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  transform: translateZ(0);
+}
+
+.turbo-cta::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    120deg,
+    rgba(255, 255, 255, 0.22) 0 8px,
+    transparent 8px 16px
+  );
+  mix-blend-mode: soft-light;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.turbo-cta > span {
+  position: relative;
+  z-index: 2;
+}
+
+.turbo-cta::after {
+  content: "";
+  position: absolute;
+  top: -10%;
+  bottom: -10%;
+  left: 0;
+  width: 42%;
+  background: linear-gradient(90deg, transparent, hsla(0, 0%, 100%, 0.45), transparent);
+  opacity: 0.5;
+  pointer-events: none;
+  animation: turboShine 1.15s linear infinite;
+  z-index: 1;
+}
+
+.turbo-cta-on {
+  color: #ffffff;
+  border: 1px solid rgba(248, 113, 113, 0.72);
+  background: linear-gradient(110deg, #7f1d1d 0%, #b91c1c 34%, #dc2626 66%, #ef4444 100%);
+  background-size: 300% 300%;
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.26);
+  box-shadow: 0 10px 28px -10px rgba(239, 68, 68, 0.85), inset 0 0 18px rgba(255, 255, 255, 0.14);
+  animation: turboGradient 1.1s linear infinite, turboHalo 0.85s ease-out infinite, turboFlicker 2s steps(1, end) infinite;
+}
+
+.turbo-cta-on::before {
+  opacity: 0.44;
+  animation: turboSpeedLines 0.45s linear infinite;
+}
+
+.turbo-cta-on:hover {
+  filter: brightness(1.1) saturate(1.15);
+  transform: translateY(-1px) scale(1.01);
+}
+
+.turbo-cta-on:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.turbo-cta-off {
+  border: 1px solid hsl(var(--border));
+  background: linear-gradient(120deg, hsl(var(--secondary)), hsl(var(--background)));
+  color: hsl(var(--foreground));
+}
+
+.turbo-cta-off::after {
+  opacity: 0.22;
+  animation-duration: 2.1s;
+}
+
+.turbo-cta-off::before {
+  opacity: 0.1;
+  animation: turboSpeedLines 2.2s linear infinite;
+}
+
+.turbo-cta-off:hover {
+  border-color: hsl(var(--primary) / 0.5);
+  background: linear-gradient(120deg, hsl(var(--primary) / 0.1), hsl(var(--secondary)));
+}
+
+.turbo-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  display: inline-block;
+  background: currentColor;
+  opacity: 0.66;
+}
+
+.turbo-dot-on {
+  background: #fecaca;
+  box-shadow: 0 0 0 0 rgba(254, 202, 202, 0.55);
+  animation: turboDotPulse 0.75s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turbo-cta-on {
+    animation: none;
+  }
+
+  .turbo-cta::before {
+    animation: none;
+  }
+
+  .turbo-cta::after {
+    animation: none;
+  }
+
+  .turbo-dot-on {
+    animation: none;
+  }
+}
+
 /* ===== CARD ANIMATIONS ===== */
 .card-hover {
   transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);

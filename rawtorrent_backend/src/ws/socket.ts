@@ -1,7 +1,6 @@
 import http from "http";
 import { WebSocket, WebSocketServer } from "ws";
-import { torrentEventBus } from "../redis/publisher";
-import { initSubscriber } from "../redis/subscriber";
+import { backendEventBus } from "../events/eventBus";
 import { logger } from "../utils/logger";
 import type { TorrentEvent } from "../types/torrent";
 
@@ -18,11 +17,7 @@ const broadcastEvent = (wss: WebSocketServer, event: TorrentEvent) => {
 export const setupWebSocket = (server: http.Server) => {
   const wss = new WebSocketServer({ server, path: "/ws" });
 
-  torrentEventBus.on("event", (event: TorrentEvent) => {
-    broadcastEvent(wss, event);
-  });
-
-  initSubscriber((event) => {
+  backendEventBus.on("event", (event: TorrentEvent) => {
     broadcastEvent(wss, event);
   });
 

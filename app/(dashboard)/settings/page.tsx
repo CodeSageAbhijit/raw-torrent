@@ -139,12 +139,17 @@ export default function SettingsPage() {
   };
 
   const handleReset = async () => {
-    setSettings(DEFAULT_SETTINGS);
+    const nextSettings = {
+      ...DEFAULT_SETTINGS,
+      turboMode: settings.turboMode,
+    };
+
+    setSettings(nextSettings);
     try {
       await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(DEFAULT_SETTINGS),
+        body: JSON.stringify(nextSettings),
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -154,13 +159,18 @@ export default function SettingsPage() {
   };
 
   const handleApplySpeedPreset = async () => {
-    setSettings(SPEED_PRESET);
+    const nextSettings = {
+      ...SPEED_PRESET,
+      turboMode: settings.turboMode,
+    };
+
+    setSettings(nextSettings);
     setIsSaving(true);
     try {
       const response = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(SPEED_PRESET),
+        body: JSON.stringify(nextSettings),
       });
       if (response.ok) {
         setSaved(true);
@@ -496,19 +506,6 @@ export default function SettingsPage() {
 
             <div className="flex items-center gap-3 py-2">
               <input
-                id="turboMode"
-                type="checkbox"
-                checked={settings.turboMode}
-                onChange={(e) => setSettings({ ...settings, turboMode: e.target.checked })}
-                className="h-4 w-4 rounded border border-input"
-              />
-              <label htmlFor="turboMode" className="text-sm font-medium cursor-pointer">
-                Turbo Mode (disable non-essential analytics while downloading)
-              </label>
-            </div>
-
-            <div className="flex items-center gap-3 py-2">
-              <input
                 id="adaptiveTuning"
                 type="checkbox"
                 checked={settings.adaptiveTuning}
@@ -523,7 +520,7 @@ export default function SettingsPage() {
         </div>
 
         {/* Presets */}
-        <div className="rounded-md border p-6 bg-gradient-to-br from-blue-500/5 to-purple-500/5">
+        <div className="rounded-md border p-6 bg-gradient-to-br from-primary/8 to-primary/3">
           <h2 className="font-medium mb-4">⚡ Quick Presets</h2>
           <p className="text-sm text-foreground/60 mb-4">
             Choose a preset to quickly optimize for different scenarios. Your custom changes will be overwritten.
@@ -531,10 +528,10 @@ export default function SettingsPage() {
           
           <div className="space-y-3">
             {/* Speed Preset */}
-            <div className="rounded-md border border-blue-500/20 bg-blue-500/5 p-4">
+            <div className="rounded-md border border-primary/30 bg-primary/5 p-4">
               <div className="flex justify-between items-start gap-4">
                 <div>
-                  <h3 className="font-semibold text-blue-600">⚡ High-Speed Stable</h3>
+                  <h3 className="font-semibold text-primary">⚡ High-Speed Stable</h3>
                   <p className="text-xs text-foreground/60 mt-1">
                     Faster profile tuned for long runs without overwhelming disk and memory.
                   </p>
@@ -548,7 +545,7 @@ export default function SettingsPage() {
                 <button
                   onClick={handleApplySpeedPreset}
                   disabled={isSaving}
-                  className="rounded-md bg-blue-600 text-white px-4 py-2 text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-60 whitespace-nowrap"
+                  className="rounded-md bg-primary text-primary-foreground px-4 py-2 text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-60 whitespace-nowrap"
                 >
                   Apply
                 </button>
@@ -556,10 +553,10 @@ export default function SettingsPage() {
             </div>
 
             {/* Default Preset */}
-            <div className="rounded-md border border-amber-500/20 bg-amber-500/5 p-4">
+            <div className="rounded-md border border-primary/20 bg-primary/4 p-4">
               <div className="flex justify-between items-start gap-4">
                 <div>
-                  <h3 className="font-semibold text-amber-600">⚖️ Default Long-Run Stable</h3>
+                  <h3 className="font-semibold text-primary">⚖️ Default Long-Run Stable</h3>
                   <p className="text-xs text-foreground/60 mt-1">
                     Strong throughput with lower churn for 24/7 sessions.
                   </p>
@@ -572,7 +569,7 @@ export default function SettingsPage() {
                 </div>
                 <button
                   onClick={handleReset}
-                  className="rounded-md border px-4 py-2 text-sm font-medium hover:bg-foreground/5 transition-colors whitespace-nowrap"
+                  className="rounded-md border border-primary/35 text-primary px-4 py-2 text-sm font-medium hover:bg-primary/10 transition-colors whitespace-nowrap"
                 >
                   Apply
                 </button>

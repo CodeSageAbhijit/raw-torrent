@@ -1,70 +1,90 @@
 # RawTorrent
 
-**RawTorrent** is a powerful peer-to-peer (P2P) analytics and tracker dashboard built for modern web standards. Monitor torrent sessions, visualize global peer connections with an interactive swarm map, and track real-time transfer speeds and protocol event streams—all within a seamless, high-performance interface.
+RawTorrent is a web-based torrent monitoring and control dashboard.
+It provides live torrent progress, peer telemetry, session controls, and file/session cleanup in a modern Next.js UI backed by a Node.js WebTorrent service.
 
-## 🚀 Features
+## Features
 
-- **Live Session Analytics**: Real-time visualization of upload/download speeds, active seeders, leechers, and tracker health.
-- **Global Handshake Map**: Fully interactive map indicating peer locations dynamically. Supports zoom, scroll, and real-time hover telemetry.
-- **Secure Authentication**: Powered by Supabase. Supports Email/Password, Anonymous (Guest) sessions, and OAuth (Google & GitHub). Route protection seamlessly managed via Next.js Middleware.
-- **Real-Time Protocol Logs**: Live streaming of RC4-SHA handshakes, DHT lookups, wire keep-alive events, and choked/unchoked signals.
-- **Server/Client Boundary Separation**: Strict isolation of UI components and server data fetching to leverage App Router optimizations.
-- **Theming**: Integrated beautiful light/dark mode variations with `--primary` and `--accent` color variables mapping via Tailwind V4.
+- Live torrent session dashboard (status, peers, progress)
+- Detailed per-session telemetry views (pieces, peers, map)
+- Start, pause, resume, stop, and delete session controls
+- Backend auto-resume support for persisted sessions
+- Disk safety guard limits to prevent sustained SSD overload
 
-## 🛠️ Tech Stack
+## Tech Stack
 
-- **Framework**: [Next.js 16.2.1](https://nextjs.org/) (App Router, Turbopack)
-- **UI Library**: [React 19.2.4](https://react.dev)
-- **Styling**: [Tailwind CSS v4](https://tailwindcss.com/) & `next-themes`
-- **Data & Auth**: [Supabase SSR](https://supabase.com/) (`@supabase/ssr`, `@supabase/supabase-js`)
-- **Mapping & Data Viz**: `react-simple-maps`, `d3-geo`, `topojson-client`
+- Frontend: Next.js 16, React 19, TypeScript, Tailwind CSS 4
+- Backend: Node.js, Express, TypeScript, WebTorrent
+- Realtime: WebSocket event stream from backend to UI
 
-## 📋 Prerequisites
+## Prerequisites
 
-Before you begin, ensure you have the following installed:
-- Node.js (v20+)
-- A [Supabase](https://supabase.com) project loaded with your Auth settings (Email, Anonymous sign-ins, and OAuth providers enabled).
+- Node.js 20+
+- npm 10+
 
-## 💻 Getting Started
+## Getting Started
 
-1. **Clone the repository** (or download it directly):
-   ```bash
-   git clone https://github.com/CodeSageAbhijit
-   /rawtorrent.git
-   cd rawtorrent
-   ```
+1. Install frontend dependencies:
 
-2. **Install dependencies**:
-   ```bash
-   npm install
-   ```
+```bash
+npm install
+```
 
-3. **Configure Environment Variables**:
-   Create a `.env.local` file in the root of your project and inject your Supabase credentials:
-   ```env
-   NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
-   NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-   ```
-   *Make sure you configure the Google/GitHub OAuth Client IDs and Secrets directly inside your Supabase Dashboard > Authentication > Providers.*
+2. Install backend dependencies:
 
-4. **Run the Development Server**:
-   ```bash
-   npm run dev
-   ```
-   *Note: This project takes advantage of Next.js Turbopack.*
+```bash
+cd rawtorrent_backend
+npm install
+cd ..
+```
 
-5. **Explore**:
-   Open [http://localhost:3000](http://localhost:3000) with your browser to see the result. Log in or continue as a Guest!
+3. Configure environment values:
 
-## 📂 Project Structure
+Frontend `.env.local`:
 
-- `app/(dashboard)/*` - Protected routes requiring valid Supabase sessions.
-- `app/(auth)/*` - Auth pathways containing Login, Signup, and OAuth redirects.
-- `app/torrent/[id]/*` - Your detailed interactive torrent telemetry views and swarm maps.
-- `components/ui/*` - Reusable interface components and layout elements.
-- `lib/supabase/*` - Server clients and middleware hooks validating active session cookies.
-- `proxy.ts` / `middleware.ts` - Next.js specific proxy layers routing unauthenticated users to `/login`.
+```env
+NEXT_PUBLIC_BACKEND_HTTP_URL=http://localhost:4000
+NEXT_PUBLIC_BACKEND_WS_URL=ws://localhost:4000
+```
 
-## 📜 License
+Backend `rawtorrent_backend/.env` (example):
 
-This project is licensed under the MIT License. Feel free to use, modify, and distribute it.
+```env
+TORRENT_STORAGE_DIR=C:\\rawtorrent-data
+DISK_SAFETY_GUARD=true
+DISK_SAFETY_MAX_DOWNLOAD_KB=12288
+DISK_SAFETY_MAX_PEERS=120
+DISK_SAFETY_MAX_REQUESTS_PER_PEER=24
+```
+
+4. Start backend:
+
+```bash
+cd rawtorrent_backend
+npm run dev
+```
+
+5. Start frontend:
+
+```bash
+npm run dev
+```
+
+6. Open the app:
+
+- Frontend: http://localhost:3000
+- Backend: http://localhost:4000
+
+## Project Structure
+
+- `app/(dashboard)/*` - Main dashboard, controls, and analytics pages
+- `app/api/settings/route.ts` - Frontend settings proxy to backend
+- `components/*` - Shared UI components
+- `lib/backend.ts` - Backend URL helpers for frontend
+- `rawtorrent_backend/src/routes/*` - Backend API routes
+- `rawtorrent_backend/src/services/*` - Core torrent/session logic
+- `rawtorrent_backend/src/ws/socket.ts` - WebSocket broadcasting
+
+## License
+
+MIT

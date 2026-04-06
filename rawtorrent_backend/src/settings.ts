@@ -39,19 +39,14 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   adaptiveTuning: true,
   extraTrackers: [
     "udp://tracker.opentrackr.org:1337/announce",
-    "udp://tracker.openbittorrent.com:80/announce",
     "udp://open.stealth.si:80/announce",
     "udp://tracker.torrent.eu.org:451/announce",
     "udp://explodie.org:6969/announce",
     "udp://tracker.tiny-vps.com:6969/announce",
-    "udp://9.rarbg.to:2710/announce",
     "udp://tracker.cyberia.is:6969/announce",
     "udp://exodus.desync.com:6969/announce",
-    "udp://tracker.publicbt.com:80/announce",
     "http://tracker.opentrackr.org:1337/announce",
     "https://tracker.opentrackr.org:443/announce",
-    "udp://tracker.1337x.com:6969/announce",
-    "udp://tracker.zer0day.to:1337/announce",
   ],
 };
 
