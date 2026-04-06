@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────
+# RawTorrent — Docker Compose (pre-built images)
+# Run with:  docker compose -f docker-compose.hub.yml up -d
+# ─────────────────────────────────────────────────────
+
+services:
+  backend:
+    image: abhijitkad/rawtorrent-backend:latest
+    ports:
+      - "4000:4000"
+    volumes:
+      - type: bind
+        source: ${RAWTORRENT_DOWNLOADS_DIR:-./downloads}
+        target: /app/downloads
+    environment:
+      - PORT=4000
+      - NODE_ENV=production
+      - TORRENT_STORAGE_DIR=/app/downloads
+      - AUTO_RESUME_ON_BOOT=true
+      - WEBTORRENT_UTP=false
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    image: abhijitkad/rawtorrent-frontend:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://backend:4000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

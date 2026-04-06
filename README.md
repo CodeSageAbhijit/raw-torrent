@@ -75,45 +75,52 @@ npm run dev
 - Frontend: http://localhost:3000
 - Backend: http://localhost:4000
 
-## Docker Compose
+## Docker Hub Images
 
-Use the included compose file to run frontend and backend together with persistent storage mounted from the host.
+If you don't want to build from source, you can use the official pre-built images:
 
-Optional: set a custom host download directory by creating a `.env` file next to `docker-compose.yml`:
+- **Frontend**: `abhijitkad/rawtorrent-frontend:latest`
+- **Backend**: `abhijitkad/rawtorrent-backend:latest`
 
-```env
-RAWTORRENT_DOWNLOADS_DIR=C:/rawtorrent-data
-```
+## Docker Deployment
+
+### 1. Using Pre-built Images (Recommended)
+
+The easiest way to run RawTorrent is using the `docker-compose.hub.yml` file which pulls images directly from Docker Hub.
+
+1. Create a folder for your downloads (e.g., `C:/rawtorrent-data`).
+2. Run the stack:
+   ```bash
+   docker compose -f docker-compose.hub.yml up -d
+   ```
+3. Open http://localhost:3000
+
+### 2. Building from Source
+
+If you have cloned the repository and want to build locally:
 
 ```bash
-docker compose up --build
+docker compose up --build -d
 ```
 
-Key details in [docker-compose.yml](docker-compose.yml):
+### Configuration (Environment Variables)
 
-- Backend storage mount: `${RAWTORRENT_DOWNLOADS_DIR:-./downloads}:/app/downloads`
-- Backend storage root inside container: `TORRENT_STORAGE_DIR=/app/downloads`
-- Auto-resume on container restart: `AUTO_RESUME_ON_BOOT=true`
-- Frontend HTTP calls use same-origin proxy (`NEXT_PUBLIC_BACKEND_HTTP_URL=/api`) to avoid container-network mismatches
-- Frontend settings/API server-side proxy uses internal Docker DNS (`BACKEND_URL=http://backend:4000`)
+Both methods support the following optional environment variables (set them in a `.env` file):
 
-After startup:
+- `RAWTORRENT_DOWNLOADS_DIR`: Path on your host to store downloads (defaults to `./downloads`).
+- `AUTO_RESUME_ON_BOOT`: Set to `true` (default) to resume active torrents when the container restarts.
+- `WEBTORRENT_UTP`: Set to `false` (default) to disable uTP if you experience network instability in Docker.
 
-- Open UI at http://localhost:3000
-- Session data, `resumable-sessions.json`, source torrents, and downloaded payloads are persisted under the host path configured by `RAWTORRENT_DOWNLOADS_DIR` (or `./downloads` by default)
+### Running Backend Only
 
-### Docker Image Users (No Repository)
-
-If you run the backend image directly, always pass a host bind mount so pieces do not stay only inside the container filesystem:
+If you only need the backend visualization engine:
 
 ```bash
 docker run -d --name rawtorrent-backend \
-	-p 4000:4000 \
-	-e TORRENT_STORAGE_DIR=/app/downloads \
-	-e AUTO_RESUME_ON_BOOT=true \
-	-e WEBTORRENT_UTP=false \
-	-v C:/rawtorrent-data:/app/downloads \
-	<your-backend-image>
+  -p 4000:4000 \
+  -v C:/your/path:/app/downloads \
+  -e AUTO_RESUME_ON_BOOT=true \
+  abhijitkad/rawtorrent-backend:latest
 ```
 
 ## Project Structure
