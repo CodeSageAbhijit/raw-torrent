@@ -135,17 +135,6 @@ By default, Docker will create a folder named `downloads` in your current direct
 - `AUTO_RESUME_ON_BOOT`: Set to `true` (default) to resume active torrents when the container restarts.
 - `WEBTORRENT_UTP`: Set to `false` (default) to disable uTP if you experience network instability in Docker.
 
-### Running Backend Only
-
-If you only need the backend visualization engine:
-
-```bash
-docker run -d --name rawtorrent-backend \
-  -p 4000:4000 \
-  -v C:/your/path:/app/downloads \
-  -e AUTO_RESUME_ON_BOOT=true \
-  abhijitkad/rawtorrent-backend:latest
-```
 
 ## Project Structure
 
