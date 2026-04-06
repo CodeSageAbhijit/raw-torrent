@@ -75,6 +75,47 @@ npm run dev
 - Frontend: http://localhost:3000
 - Backend: http://localhost:4000
 
+## Docker Compose
+
+Use the included compose file to run frontend and backend together with persistent storage mounted from the host.
+
+Optional: set a custom host download directory by creating a `.env` file next to `docker-compose.yml`:
+
+```env
+RAWTORRENT_DOWNLOADS_DIR=C:/rawtorrent-data
+```
+
+```bash
+docker compose up --build
+```
+
+Key details in [docker-compose.yml](docker-compose.yml):
+
+- Backend storage mount: `${RAWTORRENT_DOWNLOADS_DIR:-./downloads}:/app/downloads`
+- Backend storage root inside container: `TORRENT_STORAGE_DIR=/app/downloads`
+- Auto-resume on container restart: `AUTO_RESUME_ON_BOOT=true`
+- Frontend HTTP calls use same-origin proxy (`NEXT_PUBLIC_BACKEND_HTTP_URL=/api`) to avoid container-network mismatches
+- Frontend settings/API server-side proxy uses internal Docker DNS (`BACKEND_URL=http://backend:4000`)
+
+After startup:
+
+- Open UI at http://localhost:3000
+- Session data, `resumable-sessions.json`, source torrents, and downloaded payloads are persisted under the host path configured by `RAWTORRENT_DOWNLOADS_DIR` (or `./downloads` by default)
+
+### Docker Image Users (No Repository)
+
+If you run the backend image directly, always pass a host bind mount so pieces do not stay only inside the container filesystem:
+
+```bash
+docker run -d --name rawtorrent-backend \
+	-p 4000:4000 \
+	-e TORRENT_STORAGE_DIR=/app/downloads \
+	-e AUTO_RESUME_ON_BOOT=true \
+	-e WEBTORRENT_UTP=false \
+	-v C:/rawtorrent-data:/app/downloads \
+	<your-backend-image>
+```
+
 ## Project Structure
 
 - `app/(dashboard)/*` - Main dashboard, controls, and analytics pages

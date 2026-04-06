@@ -95,16 +95,18 @@ export default function SettingsPage() {
   useEffect(() => {
     const fetchSettings = async () => {
       try {
+        setError(null);
         const response = await fetch("/api/settings", { cache: "no-store" });
         if (response.ok) {
           const data = await response.json();
           setSettings({ ...DEFAULT_SETTINGS, ...data });
         } else {
-          setSettings(DEFAULT_SETTINGS);
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+          setError(payload?.error ?? "Failed to load settings from backend");
         }
       } catch (e) {
         console.error("Failed to fetch settings:", e);
-        setSettings(DEFAULT_SETTINGS);
+        setError("Failed to load settings from backend");
       } finally {
         setIsLoading(false);
       }

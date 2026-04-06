@@ -64,7 +64,6 @@ router.get("/settings", (req, res) => {
     const settings = getGlobalSettings();
     res.json({ success: true, data: settings });
   } catch (error) {
-    console.error("Failed to get settings:", error);
     res.status(500).json({ success: false, error: "Failed to get settings" });
   }
 });
@@ -98,7 +97,6 @@ router.post("/settings", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Failed to update settings:", error);
     res.status(500).json({ success: false, error: "Failed to update settings" });
   }
 });

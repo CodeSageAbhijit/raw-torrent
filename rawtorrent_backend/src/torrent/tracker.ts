@@ -135,7 +135,6 @@ const announceToUdpTracker = async (
       };
 
       const timer = setTimeout(() => {
-        console.log(`[Tracker][UDP] Timeout for ${trackerUrl} after ${timeoutMs}ms (attempt ${retryCount + 1}/${maxRetries + 1})`);
         finish();
       }, timeoutMs);
 
@@ -176,7 +175,6 @@ const announceToUdpTracker = async (
     
     // Retry logic for transient failures
     if (retryCount < maxRetries) {
-      console.log(`[Tracker][UDP] Retrying ${trackerUrl} (attempt ${retryCount + 2}/${maxRetries + 1})...`);
       await new Promise((r) => setTimeout(r, 1000 * (retryCount + 1))); // Exponential backoff
       return announceToUdpTracker(trackerUrl, torrent, options, retryCount + 1);
     }
@@ -190,7 +188,6 @@ const announceToUdpTracker = async (
 };
 
 const normalizePeers = (value: unknown): TrackerPeerDescriptor[] => {
-  console.log(`[Tracker] normalizePeers received value of type: `, typeof value, 'Is Buffer:', Buffer.isBuffer(value), 'Is Array:', Array.isArray(value), 'Length if Array/Buffer:', (value as any)?.length);
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
     const peers: TrackerPeerDescriptor[] = [];
     const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
@@ -315,7 +312,6 @@ export const announceToTracker = async (
   const announceUrl = `${trackerUrl}${separator}${params.join("&")}`;
 
   try {
-    console.log(`[Tracker] Fetching: ${announceUrl}`);
     const response = await fetch(announceUrl, {
       headers: {
         "user-agent": "RawTorrentBackend/0.1.0",
@@ -323,16 +319,13 @@ export const announceToTracker = async (
     });
 
     if (!response.ok) {
-      console.error(`[Tracker] Response failed: ${response.status} ${response.statusText}`);
       throw new Error(`Tracker response failed with status ${response.status}`);
     }
 
     const body = await decodeBencodedTrackerResponse(response);
-    console.log("[Tracker] Decoded body keys:", Object.keys(body));
 
     if (body["failure reason"]) {
       const reason = Buffer.isBuffer(body["failure reason"]) ? body["failure reason"].toString("utf8") : body["failure reason"];
-      console.error("[Tracker] Failure reason:", reason);
       logger.warn("Tracker failure", reason);
       return {
         interval: 1800,
@@ -343,10 +336,6 @@ export const announceToTracker = async (
 
     const peers = normalizePeers(body.peers);
     const peers6 = normalizePeersV6(body.peers6);
-
-    if (peers6.length > 0) {
-      console.log(`[Tracker] Parsed IPv6 peers: ${peers6.length}`);
-    }
 
     return {
       interval: Number(body.interval ?? 1800),

@@ -58,7 +58,6 @@ export const discoverPeersFromDht = async (
       const maxLookups = 3; // Multiple lookups to find more peers
 
       const bootstrapNodes = parseBootstrapNodes();
-      console.log(`[DHT] Using ${bootstrapNodes.length} bootstrap nodes`);
 
       const dht = new DhtClient({
         bootstrap: bootstrapNodes,
@@ -111,10 +110,6 @@ export const discoverPeersFromDht = async (
         const key = `${host}:${port}`;
         if (!peers.has(key)) {
           peers.set(key, { ip: host, port });
-          // Log periodically
-          if (peers.size % 50 === 0) {
-            console.log(`[DHT] Discovered ${peers.size} peers so far...`);
-          }
         }
       });
 
@@ -130,7 +125,6 @@ export const discoverPeersFromDht = async (
       const doLookup = () => {
         if (settled || lookupCount >= maxLookups) return;
         lookupCount++;
-        console.log(`[DHT] Starting lookup #${lookupCount}...`);
         dht.lookup(Buffer.from(torrent.infoHash, "hex"));
       };
 
@@ -146,7 +140,6 @@ export const discoverPeersFromDht = async (
 
       setTimeout(() => {
         clearInterval(lookupInterval);
-        console.log(`[DHT] Discovery completed. Total peers found: ${peers.size}`);
         finish();
       }, timeoutMs);
     });

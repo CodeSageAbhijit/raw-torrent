@@ -1,6 +1,10 @@
 // Shared runtime settings for the entire application
 // This is used by both the API and torrent service for consistency
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 export interface RuntimeSettings {
   port: number;
   maxPeers: number;
@@ -50,8 +54,63 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   ],
 };
 
+const getDefaultStorageRootDir = () => {
+  if (process.platform === "win32") {
+    const systemDrive = String(process.env.SystemDrive ?? "C:").trim() || "C:";
+    return path.join(systemDrive, "rawtorrent-data");
+  }
+
+  return path.join(os.homedir(), "rawtorrent-data");
+};
+
+const getStorageRootDir = () => {
+  const configured = process.env.TORRENT_STORAGE_DIR?.trim();
+  return configured && configured.length > 0 ? configured : getDefaultStorageRootDir();
+};
+
+const getSettingsFilePath = () => path.join(getStorageRootDir(), "runtime-settings.json");
+
+const loadSettingsFromDisk = (): Partial<RuntimeSettings> => {
+  const filePath = getSettingsFilePath();
+  if (!fs.existsSync(filePath)) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<RuntimeSettings>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+
+    return parsed;
+  } catch {
+    return {};
+  }
+};
+
+const persistSettingsToDisk = (settings: RuntimeSettings) => {
+  try {
+    const filePath = getSettingsFilePath();
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(settings, null, 2));
+  } catch {
+    // Ignore persistence write failures; in-memory settings still apply.
+  }
+};
+
 // Global runtime settings stored in memory
-let globalSettings: RuntimeSettings = { ...DEFAULT_RUNTIME_SETTINGS };
+let globalSettings: RuntimeSettings = {
+  ...DEFAULT_RUNTIME_SETTINGS,
+  ...loadSettingsFromDisk(),
+};
+
+if (!Array.isArray(globalSettings.extraTrackers)) {
+  globalSettings.extraTrackers = [...DEFAULT_RUNTIME_SETTINGS.extraTrackers];
+}
+
+if (!globalSettings.pieceSelectionStrategy || !["sequential", "random", "rarest-first"].includes(globalSettings.pieceSelectionStrategy)) {
+  globalSettings.pieceSelectionStrategy = DEFAULT_RUNTIME_SETTINGS.pieceSelectionStrategy;
+}
 
 export function getGlobalSettings(): RuntimeSettings {
   return globalSettings;
@@ -63,11 +122,13 @@ export function setGlobalSettings(settings: Partial<RuntimeSettings>): RuntimeSe
     ...settings,
   };
 
-  globalSettings = merged;
+  globalSettings = merged as RuntimeSettings;
+  persistSettingsToDisk(globalSettings);
   return globalSettings;
 }
 
 export function resetSettings(): RuntimeSettings {
   globalSettings = { ...DEFAULT_RUNTIME_SETTINGS };
+  persistSettingsToDisk(globalSettings);
   return globalSettings;
 }

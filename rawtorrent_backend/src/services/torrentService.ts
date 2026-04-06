@@ -20,6 +20,7 @@ import {
 import {
   deleteSessionStorage,
   ensureSessionStorage,
+  getStorageRootDir,
   getSessionStoragePaths,
   listResumableSessions,
   loadSessionSourceTorrent,
@@ -243,11 +244,14 @@ const TURBO_ESSENTIAL_EVENTS = new Set([
   "log",
 ]);
 
+const WEBTORRENT_UTP_ENABLED = process.env.WEBTORRENT_UTP !== "false";
+
 export const torrentSessions = sessions;
 
 const client = new WebTorrent({
   dht: true,
   tracker: true,
+  utp: WEBTORRENT_UTP_ENABLED,
   maxConns: 300, // Global connection pool - individual torrents will respect their per-session limits via settings
   // Intentionally omit downloadLimit. In this WebTorrent version,
   // 0 is treated as a hard stop rather than "unlimited".
@@ -411,6 +415,36 @@ const ensurePersistentSourceForManagedSession = (managedSession: ManagedSession)
   return managedSession.sourceTorrentFilePath;
 };
 
+const normalizeTorrentPathForRecord = (torrentFilePath: string | undefined): string | undefined => {
+  if (!torrentFilePath) {
+    return undefined;
+  }
+
+  const rootDir = getStorageRootDir();
+  const relative = path.relative(rootDir, torrentFilePath);
+  const isInsideStorageRoot = relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
+
+  if (!isInsideStorageRoot) {
+    return torrentFilePath;
+  }
+
+  // Keep resumable metadata portable across host/container path changes.
+  return relative.split(path.sep).join("/");
+};
+
+const resolveTorrentPathFromRecord = (record: ResumableSessionRecord): string | null => {
+  const raw = typeof record.torrentFilePath === "string" ? record.torrentFilePath.trim() : "";
+  if (!raw) {
+    return null;
+  }
+
+  if (path.isAbsolute(raw)) {
+    return raw;
+  }
+
+  return path.join(getStorageRootDir(), raw);
+};
+
 const syncResumableSessionRecord = (managedSession: ManagedSession) => {
   if (!isResumableStatus(managedSession.session.status)) {
     removeResumableSession(managedSession.session.sessionId);
@@ -444,7 +478,7 @@ const syncResumableSessionRecord = (managedSession: ManagedSession) => {
     fileName: managedSession.session.fileName,
     sourceType: managedSession.sourceType,
     magnetUri,
-    torrentFilePath,
+    torrentFilePath: normalizeTorrentPathForRecord(torrentFilePath),
     selectedFileIndices: normalizeSelectedFileIndices(managedSession.selectedFileIndices),
     status: managedSession.session.status,
     seeding: managedSession.session.seeding,
@@ -1447,6 +1481,7 @@ export const parseTorrent = async (options: StartTorrentOptions): Promise<Torren
   const tempClient = new WebTorrent({
     dht: false,
     tracker: false,
+    utp: WEBTORRENT_UTP_ENABLED,
   });
 
   return new Promise((resolve, reject) => {
@@ -2101,13 +2136,19 @@ const buildRestoreSourceOptions = (
     };
   }
 
-  const sourceBuffer = record.torrentFilePath ? loadSessionSourceTorrent(record.torrentFilePath) : null;
-  if (!sourceBuffer) {
+  const resolvedTorrentPath = resolveTorrentPathFromRecord(record);
+  const fallbackSourcePath = getSessionStoragePaths(record.sessionId, record.fileName).sourceFilePath;
+
+  const sourceBuffer = resolvedTorrentPath ? loadSessionSourceTorrent(resolvedTorrentPath) : null;
+  const fallbackBuffer = sourceBuffer ? null : loadSessionSourceTorrent(fallbackSourcePath);
+  const restoreBuffer = sourceBuffer ?? fallbackBuffer;
+
+  if (!restoreBuffer) {
     return null;
   }
 
   return {
-    input: sourceBuffer,
+    input: restoreBuffer,
   };
 };
 
@@ -2167,10 +2208,22 @@ export const restorePersistedTorrentsOnBoot = async (): Promise<AutoResumeSummar
       restored += 1;
       logger.info(`[AutoResume] Restored ${record.sessionId} (${record.fileName})`);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const duplicateRestoreError =
+        message.includes("already being downloaded") ||
+        message.includes("Cannot add duplicate torrent");
+
+      if (duplicateRestoreError) {
+        skipped += 1;
+        removeResumableSession(record.sessionId);
+        logger.warn(`[AutoResume] Skipping duplicate session ${record.sessionId}: ${message}`);
+        continue;
+      }
+
       failed += 1;
       logger.error(
         `[AutoResume] Failed to restore ${record.sessionId}:`,
-        error instanceof Error ? error.message : String(error)
+        message
       );
     }
   }

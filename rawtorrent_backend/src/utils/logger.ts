@@ -1,18 +1,8 @@
 const timestamp = () => new Date().toISOString();
 
 export const logger = {
-  debug: (...args: unknown[]) => {
-    if (process.env.LOG_LEVEL === "debug") {
-      console.debug(`[${timestamp()}]`, ...args);
-    }
-  },
-  info: (...args: unknown[]) => {
-    console.log(`[${timestamp()}]`, ...args);
-  },
-  warn: (...args: unknown[]) => {
-    console.warn(`[${timestamp()}]`, ...args);
-  },
-  error: (...args: unknown[]) => {
-    console.error(`[${timestamp()}]`, ...args);
-  },
+  debug: (...args: unknown[]) => console.debug(`[${timestamp()}] DEBUG:`, ...args),
+  info: (...args: unknown[]) => console.info(`[${timestamp()}] INFO:`, ...args),
+  warn: (...args: unknown[]) => console.warn(`[${timestamp()}] WARN:`, ...args),
+  error: (...args: unknown[]) => console.error(`[${timestamp()}] ERROR:`, ...args),
 };

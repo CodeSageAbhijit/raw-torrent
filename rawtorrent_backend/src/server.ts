@@ -43,16 +43,21 @@ export const startServer = () => {
   setupWebSocket(server);
 
   const port = Number(process.env.PORT ?? 4000);
+  const host = "0.0.0.0";
 
-  server.listen(port, () => {
-    logger.info(`RawTorrent backend listening on port ${port}`);
+  server.listen(port, host, () => {
+    logger.info(`RawTorrent backend listening on ${host}:${port}`);
 
-    void restorePersistedTorrentsOnBoot().catch((error) => {
-      logger.error(
-        "Auto-resume bootstrap failed",
-        error instanceof Error ? error.message : String(error)
-      );
-    });
+    void restorePersistedTorrentsOnBoot()
+      .then((summary) => {
+        logger.info(`Bootstrap sequence finished. Summary: attempted=${summary.attempted} restored=${summary.restored}`);
+      })
+      .catch((error) => {
+        logger.error(
+          "Auto-resume bootstrap failed",
+          error instanceof Error ? error.message : String(error)
+        );
+      });
   });
 
   return server;

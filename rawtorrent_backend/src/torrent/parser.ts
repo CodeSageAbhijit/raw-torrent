@@ -107,8 +107,6 @@ export const parseTorrentFile = async (
 
   const fileBuffer = toBuffer(input);
 
-  console.log("[parser] fileBuffer length:", fileBuffer?.length);
-
   if (fileBuffer.length === 0) {
     throw new Error("Torrent file input is empty");
   }
@@ -116,9 +114,7 @@ export const parseTorrentFile = async (
   let decoded: Record<string, unknown>;
   try {
     decoded = bencode.decode(fileBuffer) as Record<string, unknown>;
-    console.log("[parser] decoded keys:", Object.keys(decoded));
   } catch (error) {
-    console.error("[parser] bencode.decode error:", error);
     throw new Error("Failed to decode torrent file");
   }
 
