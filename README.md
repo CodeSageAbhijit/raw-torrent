@@ -119,9 +119,17 @@ If you have cloned the repository and want to build locally:
 docker compose up --build -d
 ```
 
-### Configuration (Environment Variables)
+### Configuration (Optional)
 
-Both methods support the following optional environment variables (set them in a `.env` file):
+By default, Docker will create a folder named `downloads` in your current directory to store your files.
+
+**If you want to use a different folder (e.g., `D:/MyTorrents`):**
+1. Create a file named `.env` in the same folder as your `docker-compose.yml`.
+2. Add this line:
+   ```env
+   RAWTORRENT_DOWNLOADS_DIR=D:/MyTorrents
+   ```
+3. Run `docker compose up -d` again.
 
 - `RAWTORRENT_DOWNLOADS_DIR`: Path on your host to store downloads (defaults to `./downloads`).
 - `AUTO_RESUME_ON_BOOT`: Set to `true` (default) to resume active torrents when the container restarts.
