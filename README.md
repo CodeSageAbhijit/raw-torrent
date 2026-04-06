@@ -88,11 +88,27 @@ If you don't want to build from source, you can use the official pre-built image
 
 The easiest way to run RawTorrent is using the `docker-compose.hub.yml` file which pulls images directly from Docker Hub.
 
-1. Create a folder for your downloads (e.g., `C:/rawtorrent-data`).
-2. Run the stack:
-   ```bash
-   docker compose -f docker-compose.hub.yml up -d
-   ```
+#### Running without Cloning (Quick Start)
+If you don't want to clone the whole repository, you only need the `docker-compose.hub.yml` file.
+
+**On Windows (PowerShell):**
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/CodeSageAbhijit/raw-torrent/main/docker-compose.hub.yml" -OutFile "docker-compose.yml"
+docker compose up -d
+```
+
+**On Linux/macOS (curl):**
+```bash
+curl -L https://raw.githubusercontent.com/CodeSageAbhijit/raw-torrent/main/docker-compose.hub.yml -o docker-compose.yml
+docker compose up -d
+```
+
+#### Running with the Full Repository
+If you have cloned the repository, just run:
+```bash
+docker compose -f docker-compose.hub.yml up -d
+```
+
 3. Open http://localhost:3000
 
 ### 2. Building from Source
