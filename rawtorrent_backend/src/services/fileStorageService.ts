@@ -26,12 +26,7 @@ export interface SessionDownloadMetadata {
 const sanitizeFileName = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, "_");
 
 const getDefaultStorageRootDir = () => {
-  if (process.platform === "win32") {
-    const systemDrive = String(process.env.SystemDrive ?? "C:").trim() || "C:";
-    return path.join(systemDrive, "rawtorrent-data");
-  }
-
-  return path.join(os.homedir(), "rawtorrent-data");
+  return path.join(os.homedir(), "Downloads", "RawTorrent");
 };
 
 export const getStorageRootDir = () => {

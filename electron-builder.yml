@@ -1,0 +1,41 @@
+appId: com.rawtorrent.desktop
+productName: RawTorrent
+npmRebuild: false
+directories:
+  output: dist_electron
+
+# We unpack the rawtorrent_backend and Next.js standalone directories so that external native
+# binaries (if any) and standard file operations run reliably without ASAR path issues.
+asarUnpack:
+  - rawtorrent_backend/**/*
+  - .next/standalone/**/*
+
+files:
+  - "electron/**/*"
+  - "package.json"
+  - "node_modules/**/*"
+  - ".next/standalone/**/*"
+  - ".next/static/**/*"
+  - "public/**/*"
+  - "rawtorrent_backend/dist/**/*"
+  - "rawtorrent_backend/package.json"
+  - "rawtorrent_backend/node_modules/**/*"
+
+# mac:
+#   icon: build/icon.png
+#   target: 
+#     - dmg
+#   category: public.app-category.utilities
+
+win:
+  icon: build/icon.png
+  target:
+    - nsis
+    - portable
+
+linux:
+  icon: build/icon.png
+  target:
+    - AppImage
+    - deb
+  category: Utility
