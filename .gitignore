@@ -55,3 +55,11 @@ how_torrent_works.txt
 plan.md
 fix*.js
 clean*.js
+
+# Electron build outputs
+/dist_electron/
+build_error*.log
+
+# Torrents storage default folder
+/downloads/
+/rawtorrent-data/

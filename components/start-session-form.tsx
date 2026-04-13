@@ -79,13 +79,8 @@ export function StartSessionForm() {
       setTorrentFiles(parsePayload.data.files);
       setPendingFormData({ file: torrentFile ?? undefined, magnet: trimmedMagnet });
 
-      // Only show modal for multi-file torrents
-      if (parsePayload.data.isMultiFile && parsePayload.data.files.length > 1) {
-        setShowFileSelectionModal(true);
-      } else {
-        // Single file, start directly
-        await startDownload(torrentFile, trimmedMagnet, undefined);
-      }
+      // Always show the modal so users can select a save directory
+      setShowFileSelectionModal(true);
     } catch (caughtError) {
       const errorMessage = caughtError instanceof Error ? caughtError.message : "Unable to parse torrent";
       setError(errorMessage);
@@ -94,7 +89,12 @@ export function StartSessionForm() {
     }
   };
 
-  const startDownload = async (torrentFile: File | null, magnetUri: string, selectedFileIndices?: number[]) => {
+  const startDownload = async (
+    torrentFile: File | null,
+    magnetUri: string,
+    selectedFileIndices?: number[],
+    savePath: string = ""
+  ) => {
     setError(null);
     setIsUploading(true);
     setShowFileSelectionModal(false);
@@ -116,6 +116,10 @@ export function StartSessionForm() {
           formData.append("selectedFileIndices", JSON.stringify(selectedFileIndices));
         }
 
+        if (savePath.trim()) {
+          formData.append("savePath", savePath.trim());
+        }
+
         response = await fetch(endpoint, {
           method: "POST",
           body: formData,
@@ -127,6 +131,10 @@ export function StartSessionForm() {
 
         if (selectedFileIndices && selectedFileIndices.length > 0) {
           body.selectedFileIndices = selectedFileIndices;
+        }
+
+        if (savePath.trim()) {
+          body.savePath = savePath.trim();
         }
 
         response = await fetch(endpoint, {
@@ -191,9 +199,9 @@ export function StartSessionForm() {
     await parseAndShowFiles(file, magnet);
   };
 
-  const handleFileSelectionConfirm = (selectedIndices: number[]) => {
+  const handleFileSelectionConfirm = (selectedIndices: number[], savePath: string) => {
     if (pendingFormData) {
-      startDownload(pendingFormData.file ?? null, pendingFormData.magnet, selectedIndices);
+      startDownload(pendingFormData.file ?? null, pendingFormData.magnet, selectedIndices, savePath);
     }
   };
 

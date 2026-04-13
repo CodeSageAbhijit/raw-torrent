@@ -3,7 +3,7 @@ import * as bencode from "bencode";
 import type { ParsedTorrentFile, StartTorrentOptions } from "../types/torrent"; 
 
 const DEFAULT_TRACKER_URL =
-  process.env.TORRENT_TRACKER_URL ?? "https://tracker.opentrackr.org:443/announce";
+  "https://tracker.opentrackr.org:443/announce";
 
 const toBuffer = (input: StartTorrentOptions["input"]) => {
   if (!input) {
@@ -79,6 +79,7 @@ const parseMagnetUri = (magnetUri: string, fileName?: string): ParsedTorrentFile
     pieceHashes: [],
     totalLength: 0,
     announceList,
+    files: [],
   };
 };
 
@@ -135,15 +136,26 @@ export const parseTorrentFile = async (
 
   const pieceLength = Number(info["piece length"] ?? 0);
   const fileLength = Number(info.length ?? 0);
-  const multiFileLength = Array.isArray(info.files)
-    ? info.files.reduce((sum, file) => {
-        if (typeof file === "object" && file !== null && "length" in file) {
-          return sum + Number((file as Record<string, unknown>).length ?? 0);
-        }
+  const parsedFiles: { path: string; length: number }[] = [];
+  const resolvedName = readString(info.name) || fileName;
 
-        return sum;
-      }, 0)
-    : 0;
+  if (fileLength > 0) {
+    parsedFiles.push({ path: resolvedName, length: fileLength });
+  } else if (Array.isArray(info.files)) {
+    for (const file of info.files) {
+      if (typeof file === "object" && file !== null) {
+        const length = Number((file as Record<string, unknown>).length ?? 0);
+        const pathParts = Array.isArray((file as Record<string, unknown>).path)
+          ? ((file as Record<string, unknown>).path as unknown[]).map(readString)
+          : [];
+        const filePath = pathParts.join("/");
+        const fullPath = filePath ? `${resolvedName}/${filePath}` : resolvedName;
+        parsedFiles.push({ path: fullPath, length });
+      }
+    }
+  }
+
+  const multiFileLength = parsedFiles.reduce((sum, f) => sum + f.length, 0);
   const totalLength = fileLength > 0 ? fileLength : multiFileLength;
 
   const announce = readString(decoded.announce);
@@ -157,8 +169,6 @@ export const parseTorrentFile = async (
   const trackerUrls = [announce, ...announceList].filter(Boolean);
   const resolvedTrackers = trackerUrls.length > 0 ? trackerUrls : [DEFAULT_TRACKER_URL];
 
-  const resolvedName = readString(info.name) || fileName;
-
   return {
     fileName: resolvedName,
     sourceType: "torrent-file",
@@ -169,5 +179,6 @@ export const parseTorrentFile = async (
     pieceHashes,
     totalLength,
     announceList: resolvedTrackers,
+    files: parsedFiles,
   };
 };

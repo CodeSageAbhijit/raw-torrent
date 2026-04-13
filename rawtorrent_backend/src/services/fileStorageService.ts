@@ -26,24 +26,17 @@ export interface SessionDownloadMetadata {
 const sanitizeFileName = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, "_");
 
 const getDefaultStorageRootDir = () => {
-  if (process.platform === "win32") {
-    const systemDrive = String(process.env.SystemDrive ?? "C:").trim() || "C:";
-    return path.join(systemDrive, "rawtorrent-data");
-  }
-
-  return path.join(os.homedir(), "rawtorrent-data");
+  return path.join(os.homedir(), "Downloads", "RawTorrent");
 };
 
 export const getStorageRootDir = () => {
-  const configured = process.env.TORRENT_STORAGE_DIR?.trim();
-
   // Keep torrent payloads out of user-profile folders by default for steadier 24/7 writes.
-  return configured && configured.length > 0 ? configured : getDefaultStorageRootDir();
+  return getDefaultStorageRootDir();
 };
 
-export const getSessionStoragePaths = (sessionId: string, fileName = "download.bin"): SessionStoragePaths => {
+export const getSessionStoragePaths = (sessionId: string, fileName = "download.bin", savePath?: string): SessionStoragePaths => {
   const rootDir = getStorageRootDir();
-  const sessionDir = path.join(rootDir, sessionId);
+  const sessionDir = savePath ? path.join(savePath, sessionId) : path.join(rootDir, sessionId);
   const piecesDir = path.join(sessionDir, "pieces");
   const safeName = sanitizeFileName(fileName);
 
@@ -71,7 +64,7 @@ export const piecePath = (paths: SessionStoragePaths, index: number) =>
 
 export const writeJsonSafely = (filePath: string, value: unknown) => {
   const payload = JSON.stringify(value, null, 2);
-  const attempts = Number(process.env.STATE_WRITE_RETRIES ?? 5);
+  const attempts = 5;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
@@ -110,6 +103,7 @@ const normalizeResumableStatus = (value: unknown): ResumableSessionRecord["statu
   if (value === "starting") return "starting";
   if (value === "running") return "running";
   if (value === "paused") return "paused";
+  if (value === "completed") return "completed";
   return null;
 };
 
@@ -142,6 +136,7 @@ const normalizeResumableRecord = (value: unknown): ResumableSessionRecord | null
     magnetUri?: unknown;
     torrentFilePath?: unknown;
     selectedFileIndices?: unknown;
+    savePath?: unknown;
     status?: unknown;
     seeding?: unknown;
     createdAt?: unknown;
@@ -177,11 +172,13 @@ const normalizeResumableRecord = (value: unknown): ResumableSessionRecord | null
         ? raw.torrentFilePath
         : undefined,
     selectedFileIndices: normalizeSelectedFileIndices(raw.selectedFileIndices),
+    savePath: typeof raw.savePath === "string" && raw.savePath.trim().length > 0 ? raw.savePath : undefined,
     status,
     seeding: raw.seeding === true,
     createdAt,
     updatedAt,
   };
+
 
   if (normalized.sourceType === "magnet" && !normalized.magnetUri) {
     return null;

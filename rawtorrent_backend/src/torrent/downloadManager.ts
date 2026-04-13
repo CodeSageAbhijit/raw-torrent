@@ -72,6 +72,7 @@ export interface DownloadManagerOptions {
   pieceLength: number;
   totalLength: number;
   fileName: string;
+  savePath?: string;
 }
 
 export class DownloadManager extends EventEmitter {
@@ -106,7 +107,7 @@ export class DownloadManager extends EventEmitter {
     this.pieceLength = options.pieceLength;
     this.totalLength = options.totalLength;
     this.fileName = options.fileName;
-    this.storage = getSessionStoragePaths(options.sessionId, options.fileName);
+    this.storage = getSessionStoragePaths(options.sessionId, options.fileName, options.savePath);
     ensureSessionStorage(this.storage);
 
     // Initialize piece states
@@ -802,7 +803,7 @@ export class DownloadManager extends EventEmitter {
 
   private persistStateToDisk(force = false) {
     const now = Date.now();
-    const minIntervalMs = Number(process.env.STATE_WRITE_INTERVAL_MS ?? 750);
+    const minIntervalMs = 750;
 
     if (!force && now - this.lastStatePersistAt < minIntervalMs) {
       if (!this.statePersistTimer) {

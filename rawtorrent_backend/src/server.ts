@@ -1,13 +1,12 @@
 import express from "express";
 import http from "http";
-import dotenv from "dotenv";
 import cors from "cors";
 import torrentRoutes from "./routes/torrent.routes";
 import { restorePersistedTorrentsOnBoot } from "./services/torrentService";
 import { setupWebSocket } from "./ws/socket";
 import { logger } from "./utils/logger";
 
-dotenv.config();
+const BACKEND_PORT = parseInt(process.env.PORT || "4000", 10);
 
 export const startServer = () => {
   const app = express();
@@ -42,7 +41,7 @@ export const startServer = () => {
   const server = http.createServer(app);
   setupWebSocket(server);
 
-  const port = Number(process.env.PORT ?? 4000);
+  const port = BACKEND_PORT;
   const host = "0.0.0.0";
 
   server.listen(port, host, () => {

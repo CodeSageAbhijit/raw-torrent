@@ -25,13 +25,17 @@ export const getBackendWsUrl = () => {
   }
 
   if (typeof window !== "undefined") {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsPort = normalizeUrl(process.env.NEXT_PUBLIC_BACKEND_WS_PORT)?.replace(/\//g, "");
-    const host = window.location.hostname;
-    if (wsPort) {
-      return `${protocol}//${host}:${wsPort}`;
+    let storedPort = sessionStorage.getItem("wsPort");
+    const queryPort = new URLSearchParams(window.location.search).get("wsPort");
+    if (queryPort) {
+      storedPort = queryPort;
+      sessionStorage.setItem("wsPort", queryPort);
     }
-    return `${protocol}//${host}:4000`;
+    const finalPort = storedPort || normalizeUrl(process.env.NEXT_PUBLIC_BACKEND_WS_PORT)?.replace(/\//g, "") || "4000";
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.hostname;
+    return `${protocol}//${host}:${finalPort}`;
   }
 
   return "ws://localhost:4000";

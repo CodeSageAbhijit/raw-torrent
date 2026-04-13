@@ -1,16 +1,19 @@
 {
   "name": "rawtorrent",
   "version": "0.1.0",
-  "private": true,
+  "main": "electron/main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "electron:start": "electron .",
+    "electron:build": "npm run build && node -e \"const fs=require('fs'); fs.cpSync('public', '.next/standalone/public', {recursive:true}); fs.cpSync('.next/static', '.next/standalone/.next/static', {recursive:true});\" && cd rawtorrent_backend && npm run build && cd .. && electron-builder"
   },
   "dependencies": {
     "clsx": "^2.1.1",
     "d3-geo": "^3.1.1",
+    "electron-updater": "^6.8.3",
     "next": "16.2.1",
     "next-themes": "^0.4.6",
     "react": "19.2.4",
@@ -28,10 +31,16 @@
     "@types/react-dom": "^19",
     "@types/react-simple-maps": "^3.0.6",
     "@types/topojson-client": "^3.1.5",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^41.1.1",
+    "electron-builder": "^26.8.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.1",
+    "sharp": "^0.34.5",
     "tailwindcss": "^4",
     "tailwindcss-animate": "^1.0.7",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^9.0.4"
   }
 }

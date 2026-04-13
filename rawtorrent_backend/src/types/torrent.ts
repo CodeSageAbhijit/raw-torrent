@@ -42,6 +42,7 @@ export interface ParsedTorrentFile {
   pieceHashes: string[];
   totalLength: number;
   announceList: string[];
+  files: { path: string; length: number }[];
 }
 
 export interface TrackerPeerDescriptor {
@@ -82,6 +83,7 @@ export interface StartTorrentOptions {
   sessionId?: string;
   userId?: string;
   selectedFileIndices?: number[];
+  savePath?: string;
 }
 
 export interface ResumableSessionRecord {
@@ -92,8 +94,10 @@ export interface ResumableSessionRecord {
   magnetUri?: string;
   torrentFilePath?: string;
   selectedFileIndices?: number[];
-  status: "starting" | "running" | "paused";
+  savePath?: string;
+  status: "starting" | "running" | "paused" | "completed";
   seeding: boolean;
   createdAt: number;
   updatedAt: number;
 }
+

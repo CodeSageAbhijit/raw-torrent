@@ -20,24 +20,15 @@ const DEFAULT_BOOTSTRAP_NODES = [
   "router.silotis.us:6881",
 ];
 
+const DHT_DISCOVERY_TIMEOUT_MS = 15000;
+
 const parseBootstrapNodes = (): string[] => {
-  const raw = process.env.DHT_BOOTSTRAP_NODES;
-
-  if (!raw) {
-    return DEFAULT_BOOTSTRAP_NODES;
-  }
-
-  const nodes = raw
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-
-  return nodes.length > 0 ? [...nodes, ...DEFAULT_BOOTSTRAP_NODES] : DEFAULT_BOOTSTRAP_NODES;
+  return DEFAULT_BOOTSTRAP_NODES;
 };
 
 export const discoverPeersFromDht = async (
   torrent: ParsedTorrentFile,
-  timeoutMs = Number(process.env.DHT_DISCOVERY_TIMEOUT_MS ?? 15000)
+  timeoutMs = DHT_DISCOVERY_TIMEOUT_MS
 ): Promise<TrackerPeerDescriptor[]> => {
   try {
     const dhtModule = (await dynamicImport("bittorrent-dht")) as {

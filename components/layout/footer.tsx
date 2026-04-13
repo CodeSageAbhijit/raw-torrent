@@ -1,4 +1,5 @@
 import Link from "next/link";
+import packageJson from "../../package.json";
 
 export function Footer() {
   return (
@@ -28,6 +29,8 @@ export function Footer() {
             </svg>
             View Repository
           </Link>
+          <div className="hidden sm:block w-px h-5 bg-foreground/20" />
+          <span className="text-foreground/60 text-xs">v{packageJson.version}</span>
         </div>
       </div>
     </footer>

@@ -13,7 +13,6 @@
     "bittorrent-dht": "^10.0.7",
     "bittorrent-tracker": "^10.0.12",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "multer": "^1.4.5-lts.2",
     "webtorrent": "^1.9.7",

@@ -1119,18 +1119,18 @@ export default function TorrentSessionView({
     });
   }, [isComplete, completionNotified, fetchProgress, fetchPieces, fetchPeers, pushEventLine, isTurboMode]);
 
-  const handleDownloadCompletedFile = () => {
+  const handleDownloadCompletedFile = async () => {
     if (!session) return;
     setIsDownloadPending(true);
     setError(null);
 
     try {
-      const downloadUrl = `${getBackendHttpUrl()}/torrent/sessions/${sessionId}/download`;
-      window.location.href = downloadUrl;
+      const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions/${sessionId}/open-folder`, { method: "POST" });
+      if (!response.ok) throw new Error("Failed to open");
     } catch {
-      setError("Unable to start file download");
+      setError("Unable to open designated folder.");
     } finally {
-      setTimeout(() => setIsDownloadPending(false), 1200);
+      setTimeout(() => setIsDownloadPending(false), 800);
     }
   };
 
@@ -1211,14 +1211,14 @@ export default function TorrentSessionView({
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold text-primary">Torrent download completed</p>
-                <p className="text-xs font-mono text-foreground/60">All pieces verified. You can download the assembled file now.</p>
+                <p className="text-xs font-mono text-foreground/60">All pieces verified. The file is saved in your chosen folder.</p>
               </div>
               <button
                 onClick={handleDownloadCompletedFile}
                 disabled={isDownloadPending}
                 className="rounded-md border border-primary/40 px-3 py-1.5 text-xs font-semibold text-primary hover:bg-primary/10 disabled:opacity-60"
               >
-                {isDownloadPending ? "Preparing file..." : "Download now"}
+                {isDownloadPending ? "Opening..." : "Open Folder"}
               </button>
             </div>
           </section>

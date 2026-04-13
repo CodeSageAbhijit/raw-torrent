@@ -24,51 +24,137 @@ export interface RuntimeSettings {
   extraTrackers: string[];
 }
 
-// Default settings - optimized for good speed and stability
-export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
-  port: 6881,
-  maxPeers: 120,
-  downloadLimit: 12288, // 12 MB/s default ceiling for SSD safety
-  uploadLimit: 1024, // 1 MB/s cap helps keep downloads stable over long runs
-  maxRequestsPerPeer: 20,
-  requestTimeoutMs: 20000,
-  trackerAnnounceInterval: 45,
-  trackerNumwant: 350,
-  autoPickBestPeers: true,
-  enablePEX: true,
-  enableDHT: true,
-  pieceSelectionStrategy: "rarest-first",
-  peerConnectionTimeoutMs: 12000,
-  turboMode: true,
-  adaptiveTuning: true,
-  extraTrackers: [
-    "udp://tracker.opentrackr.org:1337/announce",
-    "udp://open.stealth.si:80/announce",
-    "udp://tracker.torrent.eu.org:451/announce",
-    "udp://explodie.org:6969/announce",
-    "udp://tracker.tiny-vps.com:6969/announce",
-    "udp://tracker.cyberia.is:6969/announce",
-    "udp://exodus.desync.com:6969/announce",
-    "http://tracker.opentrackr.org:1337/announce",
-    "https://tracker.opentrackr.org:443/announce",
-  ],
-};
+type DeviceProfile = "low" | "balanced" | "high";
 
-const getDefaultStorageRootDir = () => {
-  if (process.platform === "win32") {
-    const systemDrive = String(process.env.SystemDrive ?? "C:").trim() || "C:";
-    return path.join(systemDrive, "rawtorrent-data");
+const pickDeviceProfile = (): DeviceProfile => {
+  const totalMemGiB = os.totalmem() / (1024 ** 3);
+  const cpuCores = os.cpus().length;
+
+  if (totalMemGiB <= 8 || cpuCores <= 4) {
+    return "low";
   }
 
-  return path.join(os.homedir(), "rawtorrent-data");
+  if (totalMemGiB <= 16 || cpuCores <= 8) {
+    return "balanced";
+  }
+
+  return "high";
+};
+
+const buildAutoDefaults = (): RuntimeSettings => {
+  const profile = pickDeviceProfile();
+
+  const profileSettings: Record<DeviceProfile, Pick<RuntimeSettings, "maxPeers" | "downloadLimit" | "maxRequestsPerPeer" | "trackerNumwant">> = {
+    low: {
+      maxPeers: 32,
+      downloadLimit: 2048,
+      maxRequestsPerPeer: 6,
+      trackerNumwant: 120,
+    },
+    balanced: {
+      maxPeers: 48,
+      downloadLimit: 4096,
+      maxRequestsPerPeer: 8,
+      trackerNumwant: 180,
+    },
+    high: {
+      maxPeers: 64,
+      downloadLimit: 6144,
+      maxRequestsPerPeer: 10,
+      trackerNumwant: 240,
+    },
+  };
+
+  return {
+    port: 6881,
+    maxPeers: profileSettings[profile].maxPeers,
+    downloadLimit: profileSettings[profile].downloadLimit,
+    uploadLimit: 1024,
+    maxRequestsPerPeer: profileSettings[profile].maxRequestsPerPeer,
+    requestTimeoutMs: 20000,
+    trackerAnnounceInterval: 45,
+    trackerNumwant: profileSettings[profile].trackerNumwant,
+    autoPickBestPeers: true,
+    enablePEX: true,
+    enableDHT: true,
+    pieceSelectionStrategy: "rarest-first",
+    peerConnectionTimeoutMs: 12000,
+    turboMode: false,
+    adaptiveTuning: true,
+    extraTrackers: [
+      "udp://tracker.opentrackr.org:1337/announce",
+      "udp://open.stealth.si:80/announce",
+      "udp://tracker.torrent.eu.org:451/announce",
+      "udp://explodie.org:6969/announce",
+      "udp://tracker.tiny-vps.com:6969/announce",
+      "udp://tracker.cyberia.is:6969/announce",
+      "udp://exodus.desync.com:6969/announce",
+      "http://tracker.opentrackr.org:1337/announce",
+      "https://tracker.opentrackr.org:443/announce",
+    ],
+  };
+};
+
+// Default settings are auto-profiled from local CPU/RAM once on service boot.
+export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = buildAutoDefaults();
+
+const getDefaultStorageRootDir = () => {
+  return path.join(os.homedir(), "Downloads", "RawTorrent");
 };
 
 const getStorageRootDir = () => {
-  const configured = process.env.TORRENT_STORAGE_DIR?.trim();
-  return configured && configured.length > 0 ? configured : getDefaultStorageRootDir();
+  return getDefaultStorageRootDir();
 };
 
 const getSettingsFilePath = () => path.join(getStorageRootDir(), "runtime-settings.json");
+
+const clampInt = (value: unknown, fallback: number, min: number, max: number): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
+};
+
+const normalizeRuntimeSettings = (settings: Partial<RuntimeSettings>): RuntimeSettings => {
+  const merged = {
+    ...DEFAULT_RUNTIME_SETTINGS,
+    ...settings,
+  };
+
+  return {
+    ...merged,
+    port: clampInt(merged.port, DEFAULT_RUNTIME_SETTINGS.port, 1024, 65535),
+    maxPeers: clampInt(merged.maxPeers, DEFAULT_RUNTIME_SETTINGS.maxPeers, 16, 96),
+    downloadLimit: clampInt(merged.downloadLimit, DEFAULT_RUNTIME_SETTINGS.downloadLimit, 512, 6144),
+    uploadLimit: clampInt(merged.uploadLimit, DEFAULT_RUNTIME_SETTINGS.uploadLimit, 128, 4096),
+    maxRequestsPerPeer: clampInt(merged.maxRequestsPerPeer, DEFAULT_RUNTIME_SETTINGS.maxRequestsPerPeer, 4, 12),
+    requestTimeoutMs: clampInt(merged.requestTimeoutMs, DEFAULT_RUNTIME_SETTINGS.requestTimeoutMs, 5000, 60000),
+    trackerAnnounceInterval: clampInt(merged.trackerAnnounceInterval, DEFAULT_RUNTIME_SETTINGS.trackerAnnounceInterval, 15, 300),
+    trackerNumwant: clampInt(merged.trackerNumwant, DEFAULT_RUNTIME_SETTINGS.trackerNumwant, 50, 300),
+    peerConnectionTimeoutMs: clampInt(
+      merged.peerConnectionTimeoutMs,
+      DEFAULT_RUNTIME_SETTINGS.peerConnectionTimeoutMs,
+      5000,
+      30000
+    ),
+    enablePEX: merged.enablePEX !== false,
+    enableDHT: merged.enableDHT !== false,
+    autoPickBestPeers: merged.autoPickBestPeers !== false,
+    turboMode: merged.turboMode === true,
+    adaptiveTuning: merged.adaptiveTuning !== false,
+    pieceSelectionStrategy:
+      merged.pieceSelectionStrategy === "sequential" ||
+      merged.pieceSelectionStrategy === "random" ||
+      merged.pieceSelectionStrategy === "rarest-first"
+        ? merged.pieceSelectionStrategy
+        : DEFAULT_RUNTIME_SETTINGS.pieceSelectionStrategy,
+    extraTrackers: Array.isArray(merged.extraTrackers)
+      ? merged.extraTrackers.filter((tracker) => typeof tracker === "string" && tracker.trim().length > 0)
+      : [...DEFAULT_RUNTIME_SETTINGS.extraTrackers],
+  };
+};
 
 const loadSettingsFromDisk = (): Partial<RuntimeSettings> => {
   const filePath = getSettingsFilePath();
@@ -99,30 +185,17 @@ const persistSettingsToDisk = (settings: RuntimeSettings) => {
 };
 
 // Global runtime settings stored in memory
-let globalSettings: RuntimeSettings = {
-  ...DEFAULT_RUNTIME_SETTINGS,
-  ...loadSettingsFromDisk(),
-};
-
-if (!Array.isArray(globalSettings.extraTrackers)) {
-  globalSettings.extraTrackers = [...DEFAULT_RUNTIME_SETTINGS.extraTrackers];
-}
-
-if (!globalSettings.pieceSelectionStrategy || !["sequential", "random", "rarest-first"].includes(globalSettings.pieceSelectionStrategy)) {
-  globalSettings.pieceSelectionStrategy = DEFAULT_RUNTIME_SETTINGS.pieceSelectionStrategy;
-}
+let globalSettings: RuntimeSettings = normalizeRuntimeSettings(loadSettingsFromDisk());
 
 export function getGlobalSettings(): RuntimeSettings {
   return globalSettings;
 }
 
 export function setGlobalSettings(settings: Partial<RuntimeSettings>): RuntimeSettings {
-  const merged = {
+  globalSettings = normalizeRuntimeSettings({
     ...globalSettings,
     ...settings,
-  };
-
-  globalSettings = merged as RuntimeSettings;
+  });
   persistSettingsToDisk(globalSettings);
   return globalSettings;
 }

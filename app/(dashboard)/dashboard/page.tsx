@@ -65,6 +65,39 @@ export default function DashboardPage() {
 
   const isDeletingSession = (sessionId: string) => deletingSessionIds.includes(sessionId);
 
+  const [togglingSessionIds, setTogglingSessionIds] = useState<string[]>([]);
+  const isTogglingSession = (sessionId: string) => togglingSessionIds.includes(sessionId);
+
+  const handleToggleSession = async (session: BackendSession) => {
+    if (isTogglingSession(session.sessionId)) return;
+    const action = isActiveStatus(session.status) ? "pause" : "resume";
+    
+    setTogglingSessionIds((current) => [...current, session.sessionId]);
+    setError(null);
+
+    try {
+      const response = await fetch(`${getBackendHttpUrl()}/torrent/sessions/${session.sessionId}/${action}`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to ${action} session`);
+      }
+
+      setSessions((current) =>
+        current.map((s) =>
+          s.sessionId === session.sessionId
+            ? { ...s, status: action === "pause" ? "paused" : "running" }
+            : s
+        )
+      );
+    } catch (err: any) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTogglingSessionIds((current) => current.filter((id) => id !== session.sessionId));
+    }
+  };
+
   const handleDeleteSession = async (session: BackendSession) => {
     if (isDeletingSession(session.sessionId)) {
       return;
@@ -283,6 +316,26 @@ export default function DashboardPage() {
             )
           );
         }
+
+        if (event.type === "torrent_paused") {
+          setSessions((current) =>
+            current.map((session) =>
+              session.sessionId === eventSessionId
+                ? { ...session, status: "paused" }
+                : session
+            )
+          );
+        }
+
+        if (event.type === "torrent_resumed") {
+          setSessions((current) =>
+            current.map((session) =>
+              session.sessionId === eventSessionId
+                ? { ...session, status: "running" }
+                : session
+            )
+          );
+        }
       } catch {
         // no-op
       }
@@ -393,14 +446,36 @@ export default function DashboardPage() {
                           >
                             {session.fileName}
                           </Link>
-                          <button
-                            type="button"
-                            onClick={() => void handleDeleteSession(session)}
-                            disabled={isDeletingSession(session.sessionId)}
-                            className="inline-flex items-center rounded-md border border-destructive/40 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {isDeletingSession(session.sessionId) ? "Deleting..." : "Delete"}
-                          </button>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => void handleToggleSession(session)}
+                              disabled={isTogglingSession(session.sessionId)}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-primary/40 text-primary transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-60"
+                              title={isActiveStatus(session.status) ? "Pause" : "Resume"}
+                            >
+                              {isTogglingSession(session.sessionId) ? (
+                                <svg className="h-3.5 w-3.5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                              ) : isActiveStatus(session.status) ? (
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 fill-current" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                              ) : (
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 fill-current" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteSession(session)}
+                              disabled={isDeletingSession(session.sessionId)}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-destructive/40 text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-60"
+                              title="Delete"
+                            >
+                              {isDeletingSession(session.sessionId) ? (
+                                <svg className="h-3.5 w-3.5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                              ) : (
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                              )}
+                            </button>
+                          </div>
                         </div>
                       </td>
                       <td className="p-4">
@@ -428,3 +503,4 @@ export default function DashboardPage() {
     </div>
   );
 }
+

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import WebTorrent from "webtorrent";
 import bencode from "bencode";
@@ -31,6 +32,7 @@ import {
 } from "./fileStorageService";
 import { getGlobalSettings } from "../settings";
 import { logger } from "../utils/logger";
+import { createPieceStore, stitchPieceFiles } from "./pieceFileStore";
 
 type TorrentLike = any;
 
@@ -83,6 +85,7 @@ type ManagedSession = {
   sourceType: "magnet" | "torrent-file";
   sourceTorrentFilePath?: string;
   selectedFileIndices?: number[];
+  savePath?: string;
   pieceStates: PieceState[];
   peerStates: PeerDownloadState[];
   progress: DownloadProgress;
@@ -115,6 +118,13 @@ const DEFAULT_TRACKERS = [
 
 const SEQUENTIAL_SELECTION_PRIORITY = 999;
 const SUPPORTED_TRACKER_PROTOCOLS = new Set(["udp:", "http:", "https:", "ws:", "wss:"]);
+const AUTO_RESUME_ON_BOOT = true;
+
+const DEVICE_TOTAL_MEM_BYTES = os.totalmem();
+const MEMORY_PRESSURE_HIGH_BYTES = Math.floor(Math.max(768 * 1024 * 1024, DEVICE_TOTAL_MEM_BYTES * 0.18));
+const MEMORY_PRESSURE_CRITICAL_BYTES = Math.floor(Math.max(1024 * 1024 * 1024, DEVICE_TOTAL_MEM_BYTES * 0.24));
+const MEMORY_PRESSURE_RECOVER_BYTES = Math.floor(MEMORY_PRESSURE_HIGH_BYTES * 0.72);
+const DETAILED_PIECE_TRACKING_LIMIT = 250000;
 
 const parsePositiveInt = (value: string | undefined, fallback: number): number => {
   const parsed = Number(value);
@@ -222,10 +232,10 @@ const extractTrackersFromSource = (source: string | Buffer, sourceType: "magnet"
 };
 
 const DISK_SAFETY_GUARD = {
-  enabled: process.env.DISK_SAFETY_GUARD !== "false",
-  maxDownloadKb: parsePositiveInt(process.env.DISK_SAFETY_MAX_DOWNLOAD_KB, 12288),
-  maxPeers: parsePositiveInt(process.env.DISK_SAFETY_MAX_PEERS, 120),
-  maxRequestsPerPeer: parsePositiveInt(process.env.DISK_SAFETY_MAX_REQUESTS_PER_PEER, 24),
+  enabled: true,
+  maxDownloadKb: DEVICE_TOTAL_MEM_BYTES <= 8 * 1024 * 1024 * 1024 ? 4096 : 6144,
+  maxPeers: DEVICE_TOTAL_MEM_BYTES <= 8 * 1024 * 1024 * 1024 ? 48 : 72,
+  maxRequestsPerPeer: DEVICE_TOTAL_MEM_BYTES <= 8 * 1024 * 1024 * 1024 ? 8 : 12,
 };
 
 const TURBO_ESSENTIAL_EVENTS = new Set([
@@ -244,7 +254,7 @@ const TURBO_ESSENTIAL_EVENTS = new Set([
   "log",
 ]);
 
-const WEBTORRENT_UTP_ENABLED = process.env.WEBTORRENT_UTP !== "false";
+const WEBTORRENT_UTP_ENABLED = true;
 
 export const torrentSessions = sessions;
 
@@ -366,8 +376,8 @@ const emitEvent = async (event: {
   await appendSessionEvent(payload);
 };
 
-const isResumableStatus = (status: TorrentSessionState["status"]): status is "starting" | "running" | "paused" =>
-  status === "starting" || status === "running" || status === "paused";
+const isResumableStatus = (status: TorrentSessionState["status"]): status is "starting" | "running" | "paused" | "completed" =>
+  status === "starting" || status === "running" || status === "paused" || status === "completed";
 
 const normalizeSelectedFileIndices = (indices?: number[]) => {
   if (!Array.isArray(indices)) {
@@ -503,9 +513,7 @@ const syncSession = async (session: TorrentSessionState) => {
 
 const getTrackerPool = (sourceTrackers: string[] = []) => {
   const settings = getGlobalSettings();
-  // Use trackers from settings, falling back to environment variables, then defaults
-  const configuredPrimary = (process.env.TORRENT_TRACKER_URL ?? "").trim();
-  return dedupeTrackers([...sourceTrackers, configuredPrimary, ...settings.extraTrackers, ...DEFAULT_TRACKERS]);
+  return dedupeTrackers([...sourceTrackers, ...settings.extraTrackers, ...DEFAULT_TRACKERS]);
 };
 
 const getPeersFromTorrent = (torrent: TorrentLike): TrackerPeerDescriptor[] => {
@@ -529,14 +537,15 @@ const getPeersFromTorrent = (torrent: TorrentLike): TrackerPeerDescriptor[] => {
   return peers;
 };
 
-const getFilePathForDownload = (sessionId: string, torrent: TorrentLike): string | null => {
+const getFilePathForDownload = (managedSession: ManagedSession, torrent: TorrentLike): string | null => {
+  const sessionId = managedSession.session.sessionId;
   const files: any[] = Array.isArray(torrent?.files) ? torrent.files : [];
   if (files.length === 0) {
     return null;
   }
 
   const preferred = files.slice().sort((a, b) => (b.length ?? 0) - (a.length ?? 0))[0];
-  const storage = getSessionStoragePaths(sessionId, preferred?.name ?? "download.bin");
+  const storage = getSessionStoragePaths(sessionId, preferred?.name ?? "download.bin", managedSession.savePath);
 
   if (preferred.path && path.isAbsolute(preferred.path)) {
     return preferred.path;
@@ -594,6 +603,12 @@ const updatePieceStatesInPlace = (torrent: TorrentLike, states: PieceState[]): P
 
   if (piecesTotal <= 0) {
     return [];
+  }
+
+  // Avoid large object graphs for very large torrents; this can consume multiple GB of RAM.
+  if (piecesTotal > DETAILED_PIECE_TRACKING_LIMIT) {
+    states.length = 0;
+    return states;
   }
 
   if (states.length !== piecesTotal) {
@@ -754,7 +769,8 @@ const flushWireTelemetry = async (managedSession: ManagedSession) => {
 
 const applyPieceSelectionStrategy = (
   torrent: TorrentLike,
-  strategy: "sequential" | "random" | "rarest-first"
+  strategy: "sequential" | "random" | "rarest-first",
+  windowSizePieces: number = 40 
 ) => {
   if (!torrent || typeof torrent.select !== "function") {
     return;
@@ -765,22 +781,41 @@ const applyPieceSelectionStrategy = (
     return;
   }
 
-  const start = 0;
-  const end = piecesTotal - 1;
+  let start = 0;
+  let end = piecesTotal - 1;
 
   if (strategy !== "sequential") {
-    // Remove only our explicit sequential override and keep normal file selections intact.
+    // Remove only our explicit sequential override.
     if (typeof torrent.deselect === "function") {
       try {
-        torrent.deselect(start, end, SEQUENTIAL_SELECTION_PRIORITY);
+        torrent.deselect(0, piecesTotal - 1, SEQUENTIAL_SELECTION_PRIORITY);
       } catch {
-        // Ignore if the sequential override was never added.
+        // Ignore
       }
     }
     return;
   }
 
-  torrent.select(start, end, SEQUENTIAL_SELECTION_PRIORITY);
+  // Dynamic Sliding Window for Sequential
+  if (windowSizePieces > 0 && torrent?.bitfield?.get) {
+    while (start < piecesTotal && torrent.bitfield.get(start)) {
+      start++;
+    }
+    
+    end = Math.min(start + windowSizePieces - 1, piecesTotal - 1);
+    
+    // Drop past pieces and future out-of-bounds pieces from the priority queue to cap RAM
+    if (typeof torrent.deselect === "function") {
+      try {
+        if (start > 0) torrent.deselect(0, start - 1, SEQUENTIAL_SELECTION_PRIORITY);
+        if (end < piecesTotal - 1) torrent.deselect(end + 1, piecesTotal - 1, SEQUENTIAL_SELECTION_PRIORITY);
+      } catch { } // Ignore
+    }
+  }
+
+  if (start <= end) {
+    torrent.select(start, end, SEQUENTIAL_SELECTION_PRIORITY);
+  }
 };
 
 const tuneAdaptiveWebTorrent = async (managedSession: ManagedSession) => {
@@ -800,10 +835,11 @@ const tuneAdaptiveWebTorrent = async (managedSession: ManagedSession) => {
   const speedMbps = managedSession.progress.downloadSpeed / (1024 * 1024);
   const peers = managedSession.progress.activePeers;
   const progress = managedSession.progress.progress;
+  const rssBytes = process.memoryUsage().rss;
   const sparseSwarm = peers > 0 && peers < 20;
   const verySparseSwarm = peers > 0 && peers < 10;
 
-  let targetMaxRequests = 24;
+  let targetMaxRequests = 20;
   if (speedMbps < 1.5) {
     targetMaxRequests = 56;
   } else if (speedMbps < 3) {
@@ -822,14 +858,48 @@ const tuneAdaptiveWebTorrent = async (managedSession: ManagedSession) => {
     targetMaxRequests = Math.max(targetMaxRequests, verySparseSwarm ? 62 : 54);
   }
 
+  // Device-aware backpressure: reduce request fan-out under memory pressure.
+  if (rssBytes >= MEMORY_PRESSURE_CRITICAL_BYTES) {
+    targetMaxRequests = Math.min(targetMaxRequests, 6);
+  } else if (rssBytes >= MEMORY_PRESSURE_HIGH_BYTES) {
+    targetMaxRequests = Math.min(targetMaxRequests, 10);
+  } else if (rssBytes < MEMORY_PRESSURE_RECOVER_BYTES) {
+    targetMaxRequests += 1;
+  }
+
   // Respect hard safety guard caps if enabled.
   const maxRequestsCap = DISK_SAFETY_GUARD.enabled ? DISK_SAFETY_GUARD.maxRequestsPerPeer : 64;
-  targetMaxRequests = Math.max(10, Math.min(maxRequestsCap, targetMaxRequests));
+  targetMaxRequests = Math.max(4, Math.min(maxRequestsCap, targetMaxRequests));
 
-  const targetStrategy: "sequential" | "random" | "rarest-first" =
+  let targetStrategy: "sequential" | "random" | "rarest-first" =
     sparseSwarm || speedMbps < 1.5 || (progress < 20 && speedMbps < 4) ? "sequential" : "rarest-first";
 
+  const baseMaxPeers = Number.isFinite(Number(settings.maxPeers)) ? Math.floor(Number(settings.maxPeers)) : 60;
+  const normalPeerCap = Math.max(16, Math.min(DISK_SAFETY_GUARD.maxPeers, baseMaxPeers));
+  let targetPeerCap = normalPeerCap;
+
+  const baseDownloadLimitKb = Number.isFinite(Number(settings.downloadLimit))
+    ? Math.floor(Number(settings.downloadLimit))
+    : DISK_SAFETY_GUARD.maxDownloadKb;
+  const normalDownloadCapKb = Math.max(1024, Math.min(DISK_SAFETY_GUARD.maxDownloadKb, baseDownloadLimitKb));
+  let targetDownloadLimitKb = normalDownloadCapKb;
+
+  if (rssBytes >= MEMORY_PRESSURE_CRITICAL_BYTES) {
+    targetPeerCap = Math.min(targetPeerCap, 32); // Keep speeds somewhat viable
+    targetDownloadLimitKb = Math.min(targetDownloadLimitKb, 4096);
+    targetStrategy = "sequential";
+  } else if (rssBytes >= MEMORY_PRESSURE_HIGH_BYTES) {
+    targetPeerCap = Math.min(targetPeerCap, 60);
+    targetStrategy = "sequential";
+  } else {
+    // For large torrents, default to sequential to keep RAM bounded
+    if (Number(managedSession.torrent?.length ?? 0) > 4 * 1024 * 1024 * 1024) {
+      targetStrategy = "sequential";
+    }
+  }
+
   const torrentRef = managedSession.torrent as any;
+  const clientRef = client as any;
   let changed = false;
 
   if (managedSession.adaptiveMaxRequests !== targetMaxRequests) {
@@ -840,8 +910,58 @@ const tuneAdaptiveWebTorrent = async (managedSession: ManagedSession) => {
 
   if (managedSession.adaptiveStrategy !== targetStrategy) {
     managedSession.adaptiveStrategy = targetStrategy;
-    applyPieceSelectionStrategy(managedSession.torrent, targetStrategy);
     changed = true;
+  }
+  
+  // Continuously apply sequential window if currently picking
+  if (managedSession.adaptiveStrategy === "sequential") {
+    // Calculate a dynamic window roughly based on memory footprint targets
+    const pieceSize = Number(managedSession.torrent?.pieceLength || 1048576);
+    // Base 640MB sliding window (40 x 16MB) normally, drops to 160MB under pressure
+    const windowMB = rssBytes >= MEMORY_PRESSURE_CRITICAL_BYTES ? 80 : 
+                     rssBytes >= MEMORY_PRESSURE_HIGH_BYTES ? 160 : 384; 
+    const windowPieces = Math.max(10, Math.floor((windowMB * 1024 * 1024) / pieceSize));
+    
+    applyPieceSelectionStrategy(managedSession.torrent, targetStrategy, windowPieces);
+  } else if (changed) {
+    applyPieceSelectionStrategy(managedSession.torrent, targetStrategy);
+  }
+
+  if (Number(clientRef.maxConns ?? 0) !== targetPeerCap) {
+    clientRef.maxConns = targetPeerCap;
+    changed = true;
+  }
+
+  const targetDownloadLimitBytes = Math.floor(targetDownloadLimitKb * 1024);
+  if (Number(clientRef.downloadLimit ?? 0) !== targetDownloadLimitBytes) {
+    clientRef.downloadLimit = targetDownloadLimitBytes;
+    changed = true;
+  }
+
+  // --- HARD-CLAMP DEAD PEERS (Graveyard Pruner) ---
+  try {
+    if (torrentRef.discovery && torrentRef.discovery._peers && typeof torrentRef.discovery._peers.size === "number") {
+      if (torrentRef.discovery._peers.size > 150) {
+        // It's a map/set: keep the first 150 and aggressively drop the rest from memory
+        const keys = Array.from(torrentRef.discovery._peers.keys()).slice(150);
+        keys.forEach((k: any) => torrentRef.discovery._peers.delete(k));
+      }
+    } else if (torrentRef.discovery && Array.isArray(torrentRef.discovery._peers) && torrentRef.discovery._peers.length > 150) {
+      torrentRef.discovery._peers.length = 150; // Drop the tail from array
+    }
+  } catch (err) { /* ignore */ }
+
+  // --- HARD-CLAMP GHOST UPLOADS (Seeding Buffer Killer) ---
+  const userGlobalUploadLimBytes = Math.floor(Number(settings.uploadLimit ?? 0) * 1024);
+  // If the user turned off uploading (Limit=0) or we are dying on memory, throttle uploads down to physical 1 Byte/sec.
+  // We don't set to 0 or undefined, because that physically implies "Unlimited" to webtorrent's speedo package.
+  const targetUploadLimitBytes = (userGlobalUploadLimBytes <= 0 || rssBytes >= MEMORY_PRESSURE_HIGH_BYTES) 
+    ? 1 
+    : userGlobalUploadLimBytes;
+
+  if (Number(clientRef.uploadLimit ?? -1) !== targetUploadLimitBytes) {
+    clientRef.uploadLimit = targetUploadLimitBytes;
+    changed = true; // Update throttle so we instantly stop reading 80MB of chunks back from disk into RAM
   }
 
   if (changed) {
@@ -853,6 +973,9 @@ const tuneAdaptiveWebTorrent = async (managedSession: ManagedSession) => {
         strategy: targetStrategy,
         speedMbps: Number(speedMbps.toFixed(2)),
         peers,
+        rssMiB: Number((rssBytes / (1024 * 1024)).toFixed(1)),
+        maxPeers: targetPeerCap,
+        downloadLimitKb: targetDownloadLimitKb,
       },
     });
   }
@@ -900,7 +1023,7 @@ const updateManagedSessionSnapshot = async (managedSession: ManagedSession) => {
     managedSession.lastPeerStateRefreshAt = now;
   }
 
-  managedSession.latestFilePath = getFilePathForDownload(managedSession.session.sessionId, torrent);
+  managedSession.latestFilePath = getFilePathForDownload(managedSession, torrent);
 
   managedSession.session.progress = managedSession.progress.progress;
   managedSession.session.peers = getPeersFromTorrent(torrent);
@@ -1222,6 +1345,15 @@ const bindTorrentEvents = (managedSession: ManagedSession) => {
   });
 
   torrent.on("done", async () => {
+    logger.info(`[Torrent: ${sessionId}] Download complete. Stitching files...`);
+    try {
+      const storagePaths = getSessionStoragePaths(sessionId, managedSession.session.fileName, managedSession.savePath);
+      await stitchPieceFiles(sessionId, storagePaths.sessionDir, torrent.files);
+      logger.info(`[Torrent: ${sessionId}] Files stitched successfully.`);
+    } catch (err) {
+      logger.error(`[Torrent: ${sessionId}] File stitching failed:`, err);
+    }
+    
     managedSession.session.status = "completed";
     await updateManagedSessionSnapshot(managedSession);
 
@@ -1297,7 +1429,7 @@ const getSourceAndType = (options: StartTorrentOptions): { source: string | Buff
 };
 
 const attachTorrentToManagedSession = async (managedSession: ManagedSession, fallbackName: string) => {
-  const storage = getSessionStoragePaths(managedSession.session.sessionId, fallbackName);
+  const storage = getSessionStoragePaths(managedSession.session.sessionId, fallbackName, managedSession.savePath);
   ensureSessionStorage(storage);
 
   const settings = getGlobalSettings();
@@ -1338,7 +1470,9 @@ const attachTorrentToManagedSession = async (managedSession: ManagedSession, fal
   if (Number.isFinite(uploadLimitKb) && uploadLimitKb > 0) {
     clientRef.uploadLimit = Math.floor(uploadLimitKb * 1024);
   } else {
-    clientRef.uploadLimit = undefined;
+    // If the GUI passed uploadLimit 0 to mean 'Disable Seeding', passing undefined unleashes "Unlimited" bandwidth
+    // and causes a 1+ GB RAM bloat reading chunks to upload. Instead we choke it to 1 byte/s.
+    clientRef.uploadLimit = 1;
   }
 
   const maxRequests = Number(settings.maxRequestsPerPeer ?? 10);
@@ -1364,12 +1498,14 @@ const attachTorrentToManagedSession = async (managedSession: ManagedSession, fal
     announce: announcePool,
     destroyStoreOnDestroy: false,
     dht: enableDht,
+    store: createPieceStore(managedSession.session.sessionId, managedSession.savePath) as any,
     // Apply user settings to this torrent
     maxRequests: normalizedMaxRequests,
     getAnnounceOpts: () => ({
       numwant: trackerNumwant,
     }),
   });
+
 
   managedSession.adaptiveMaxRequests = normalizedMaxRequests;
   managedSession.adaptiveStrategy = settings.pieceSelectionStrategy;
@@ -1593,6 +1729,7 @@ export const startTorrent = async (options: StartTorrentOptions) => {
     source,
     sourceType,
     selectedFileIndices,
+    savePath: options.savePath,
     pieceStates: [],
     peerStates: [],
     progress: {
@@ -1776,7 +1913,7 @@ export const getDownloadedFileInfo = (sessionId: string): { path: string; size: 
   }
 
   const filePath = managedSession.torrent
-    ? getFilePathForDownload(sessionId, managedSession.torrent)
+    ? getFilePathForDownload(managedSession, managedSession.torrent)
     : managedSession.latestFilePath;
   if (!filePath || !fs.existsSync(filePath)) {
     return null;
@@ -2137,7 +2274,7 @@ const buildRestoreSourceOptions = (
   }
 
   const resolvedTorrentPath = resolveTorrentPathFromRecord(record);
-  const fallbackSourcePath = getSessionStoragePaths(record.sessionId, record.fileName).sourceFilePath;
+  const fallbackSourcePath = getSessionStoragePaths(record.sessionId, record.fileName, record.savePath).sourceFilePath;
 
   const sourceBuffer = resolvedTorrentPath ? loadSessionSourceTorrent(resolvedTorrentPath) : null;
   const fallbackBuffer = sourceBuffer ? null : loadSessionSourceTorrent(fallbackSourcePath);
@@ -2153,7 +2290,7 @@ const buildRestoreSourceOptions = (
 };
 
 export const restorePersistedTorrentsOnBoot = async (): Promise<AutoResumeSummary> => {
-  if (process.env.AUTO_RESUME_ON_BOOT === "false") {
+  if (!AUTO_RESUME_ON_BOOT) {
     return { attempted: 0, restored: 0, skipped: 0, failed: 0 };
   }
 
@@ -2195,6 +2332,7 @@ export const restorePersistedTorrentsOnBoot = async (): Promise<AutoResumeSummar
         userId: record.userId ?? "local-user",
         fileName: record.fileName,
         selectedFileIndices: record.selectedFileIndices,
+        savePath: record.savePath,
       });
 
       if (record.status === "paused") {

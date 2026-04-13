@@ -68,7 +68,7 @@ const announceToUdpTracker = async (
   options: TrackerAnnounceOptions,
   retryCount = 0
 ): Promise<TrackerAnnounceResult> => {
-  const maxRetries = Number(process.env.UDP_TRACKER_MAX_RETRIES ?? 2);
+  const maxRetries = 2;
   
   try {
     const trackerModule = (await dynamicImport("bittorrent-tracker")) as {
@@ -93,7 +93,7 @@ const announceToUdpTracker = async (
     }
 
     // Increase timeout: 15s base + 5s per retry for better reliability
-    const baseTimeoutMs = Number(process.env.UDP_TRACKER_TIMEOUT_MS ?? 15000);
+    const baseTimeoutMs = 15000;
     const timeoutMs = baseTimeoutMs + (retryCount * 5000);
     // Use higher numwant for more peers (max 500 is typical tracker limit)
     const numwant = Math.min(options.numwant ?? 500, 500);

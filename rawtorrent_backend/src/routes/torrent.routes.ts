@@ -101,9 +101,36 @@ router.post("/settings", async (req, res) => {
   }
 });
 
+router.get("/choose-directory", async (req, res) => {
+  const os = await import("node:os");
+  const { exec } = await import("node:child_process");
+  const platform = os.platform();
+  
+  let cmd = "";
+  if (platform === "win32") {
+      cmd = `powershell.exe -NoProfile -STA -WindowStyle Hidden -Command "Add-Type -AssemblyName System.windows.forms; $f=New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description='Select Download Directory'; $f.ShowNewFolderButton=$true; $f.RootFolder='MyComputer'; $form = New-Object System.Windows.Forms.Form; $form.TopMost = $true; $form.ShowInTaskbar = $false; $form.WindowState = 'Minimized'; if($f.ShowDialog($form) -eq 'OK'){ [Console]::Write($f.SelectedPath) }"`;
+  } else if (platform === "darwin") {
+    cmd = `osascript -e 'tell application "System Events" to set f to choose folder with prompt "Select Download Directory"' -e 'POSIX path of f'`;
+  } else {
+    // Linux uses zenity
+    cmd = `zenity --file-selection --directory --title="Select Download Directory"`;
+  }
+
+  exec(cmd, (error, stdout) => {
+    if (error) {
+      return res.status(500).json({ error: "Could not open directory picker" });
+    }
+    const result = stdout.trim();
+    if (!result) {
+      return res.json({ canceled: true });
+    }
+    res.json({ path: result });
+  });
+});
+
 router.post("/start", upload.single("torrentFile"), async (req, res, next) => {
   try {
-    const { magnetUri, sessionId, selectedFileIndices } = req.body ?? {};
+    const { magnetUri, sessionId, selectedFileIndices, savePath } = req.body ?? {};
     const fileBuffer = req.file?.buffer;
     const fileName = req.file?.originalname;
 
@@ -146,6 +173,7 @@ router.post("/start", upload.single("torrentFile"), async (req, res, next) => {
       sessionId,
       userId: "local-user",
       selectedFileIndices: normalizeSelectedIndices(selectedFileIndices),
+      savePath,
     });
 
     res.status(202).json({
@@ -304,6 +332,58 @@ router.get("/sessions/:sessionId/peers", async (req, res, next) => {
     res.json({ success: true, data: peers ?? session.peers });
   } catch (error) {
     next(error);
+  }
+});
+
+// Open the designated output folder natively
+router.post("/sessions/:sessionId/open-folder", async (req, res, next) => {
+  try {
+    const sessionId = String(req.params.sessionId);
+    const session = await getTorrentSession(sessionId);
+
+    if (!session) {
+      if (typeof res.status === "function") res.status(404);
+      res.json({ success: false, error: "Session not found" });
+      return;
+    }
+
+    const { getSessionStoragePaths, listResumableSessions } = await import("../services/fileStorageService.js");
+    const record = listResumableSessions().find((r: any) => r.sessionId === sessionId);
+    const savePath = record?.savePath;
+    const paths = getSessionStoragePaths(sessionId, session.fileName, savePath);
+    
+    // Determine the correct folder to open:
+    // 1. If user chose a savePath, open that (it's the parent of the session subfolder)
+    // 2. Otherwise, open the directory containing the final downloaded file
+    // 3. Fallback to sessionDir
+    const fsModule = await import("node:fs");
+    const pathModule = await import("node:path");
+    
+    let folderToOpen = paths.sessionDir; // fallback
+    
+    if (savePath && fsModule.existsSync(savePath)) {
+      // User chose a custom save location — open it directly
+      folderToOpen = savePath;
+    } else if (paths.finalFilePath && fsModule.existsSync(pathModule.dirname(paths.finalFilePath))) {
+      // Open the folder containing the final file
+      folderToOpen = pathModule.dirname(paths.finalFilePath);
+    }
+    
+    const os = await import("node:os");
+    const { exec } = await import("node:child_process");
+    let cmd = "";
+    if (os.platform() === "win32") {
+        cmd = `explorer.exe "${folderToOpen}"`;
+      } else if (os.platform() === "darwin") {
+        cmd = `open "${folderToOpen}"`;
+    } else {
+        cmd = `xdg-open "${folderToOpen}"`;
+    }
+    
+    exec(cmd);
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
   }
 });
 

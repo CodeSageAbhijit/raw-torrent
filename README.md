@@ -1,151 +1,121 @@
-# RawTorrent
+# RawTorrent - Desktop Torrent Application
 
-RawTorrent is a web-based torrent monitoring and control dashboard.
-It provides live torrent progress, peer telemetry, session controls, and file/session cleanup in a modern Next.js UI backed by a Node.js WebTorrent service.
+**RawTorrent** is a high-performance, modern Desktop BitTorrent client built with web technologies but designed to operate seamlessly as a native desktop application. It combines a rich, data-driven visual interface with granular protocol controls to offer a robust and visually stunning peer-to-peer downloading experience.
 
-## Features
+---
 
-- Live torrent session dashboard (status, peers, progress)
-- Detailed per-session telemetry views (pieces, peers, map)
-- Start, pause, resume, stop, and delete session controls
-- Backend auto-resume support for persisted sessions
-- Disk safety guard limits to prevent sustained SSD overload
+## 🏗️ Architecture Deep Scan
 
-## Tech Stack
+RawTorrent implements an isomorphic, multi-process architecture bundled locally by Electron:
 
-- Frontend: Next.js 16, React 19, TypeScript, Tailwind CSS 4
-- Backend: Node.js, Express, TypeScript, WebTorrent
-- Realtime: WebSocket event stream from backend to UI
+1. **The Desktop Shell (Electron)**  
+   Packages the application into an executable. It internally spins up an Express daemon to handle the backend jobs and routes the Next.js static renderer safely into the local WebView.
+   
+2. **The Frontend Layer (Next.js + React 19 + TailwindCSS v4)**  
+   Provides a highly reactive user interface.
+   - **Visual Analytics**: Interactive map projections mapping global peer IPs directly onto standard DHT logic using `d3-geo`, `react-simple-maps`, and `topojson-client`.
+   - **Progress Engine**: A specialized React tree processes WebSockets frames continuously to render block grids without layout-thrashing the DOM.
 
-## Prerequisites
+3. **The Backend Layer (Node.js + Express + WebTorrent)**  
+   A dedicated daemon operating outside the UI thread, bypassing Electron WebView memory constraints.
+   - **WebTorrent Core**: `webtorrent` module augmented by `bittorrent-dht` and `bittorrent-tracker` for maximal swarm acquisition.
+   - **Real-time Pipeline**: Express REST APIs for complex mutations (Pause/Resume/Delete) and an integrated WebSocket server (`ws`) pushing high-frequency piece block data directly to the frontend.
+   - **Safe Storage**: Uses an intelligent sequential writing pipeline, minimizing SSD degradation by tracking pieces asynchronously.
 
-- Node.js 20+
-- npm 10+
+---
 
-## Getting Started
+## ⚡ Core Features
 
-1. Install frontend dependencies:
+- **Turbo Mode**: Disables heavy analytics and intensive geo-computations during high-speed peer flows, ensuring system resources are dedicated entirely to pulling file chunks.
+- **Advanced Piece Visualizations**: See exact bitfield progression matrices mimicking old-school BitTorrent tools but inside a minimal dashboard.
+- **Auto-Tuning Capabilities**: Automatically clamps request volumes and peer bounds preventing local hardware exhaustion depending on user bandwidth patterns.
+- **Session Continuation**: Fully resumable indexing persists in hidden storage caches, maintaining your swarm integrity even during a reboot.
+- **Geospatial Swarm Mapping**: Tracks precisely where all active peer connections are located using IP routing lookups projected on a globe visual.
+
+---
+
+## 🛠️ Development & Build Commands
+
+This project relies purely on standard `npm` infrastructure without Docker or native languages required (besides Node).
+
+### 1. Initial Setup
+Install the necessary package tree. The backend and frontend technically use separate isolation dependencies.
 
 ```bash
+# Install root/Next.js/Electron modules
 npm install
-```
 
-2. Install backend dependencies:
-
-```bash
+# Install the API backend dependencies
 cd rawtorrent_backend
 npm install
 cd ..
 ```
 
-3. Configure environment values:
+### 2. Available Scripts
 
-Frontend `.env.local`:
+Run these from the root directory to manage your development workflow:
 
-```env
-NEXT_PUBLIC_BACKEND_HTTP_URL=http://localhost:4000
-NEXT_PUBLIC_BACKEND_WS_URL=ws://localhost:4000
+- **Starts purely the Web UI context** (Helpful for styling work): 
+  ```bash
+  npm run dev
+  ```
+- **Compiles the UI to a standalone application**: 
+  ```bash
+  npm run build
+  ```
+- **Starts the Desktop Application in Development**:
+  ```bash
+  npm run electron:start
+  ```
+- **Production Executable Build (Windows/Mac/Linux)**:
+  Compiles the Node binaries, generates the Webpack tree, copies the backend payloads, and feeds it into `electron-builder` to generate an installer (`.exe`/`.dmg`).
+  ```bash
+  npm run electron:build
+  ```
+
+*(To run the API daemon independently, navigate into `rawtorrent_backend` and run `npm run dev` or `npm run start`).*
+
+---
+
+## 📁 Repository Structure
+
+```text
+rawtorrent/
+├── app/                      # Next.js 16 file-based React router
+│   ├── (dashboard)/          # Authenticated/Main GUI components
+│   └── api/                  # Proxy routing to handle backend bridging
+├── components/               # Sharable Radix/Tailwind components (UI Kit)
+├── electron/                 # Electron main process layer
+│   └── main.js               # IPC logic, Express spawning, and window frame setups
+├── lib/                      # Frontend utilities (WebSocket endpoints, auth wrappers)
+├── rawtorrent_backend/       # Independent Tracker and File Daemon
+│   ├── src/
+│   │   ├── routes/           # REST endpoints
+│   │   ├── services/         # Storage layer, Torrent engine loops
+│   │   ├── ws/               # WebSocket broadcasters
+│   │   └── index.ts          # Express startup bootstrap
+│   └── package.json          # Isolated backend dependencies
+├── electron-builder.yml      # Desktop compiler configurations
+└── package.json              # Main project dependencies & script tasks
 ```
 
-Backend `rawtorrent_backend/.env` (example):
+---
 
-```env
-TORRENT_STORAGE_DIR=C:\\rawtorrent-data
+## ⚙️ Configuration (.env)
+
+The `.env` configuration generally relies on dynamic fallback mechanisms if not hardcoded natively. The primary `.env.local` frontend configuration bridges Electron paths dynamically.
+
+If modifying the backend directly, `rawtorrent_backend/.env` can be configured as follows:
+```dotenv
+PORT=4000
+TORRENT_STORAGE_DIR="Choose specific static mapping paths here if desired"
 DISK_SAFETY_GUARD=true
-DISK_SAFETY_MAX_DOWNLOAD_KB=12288
-DISK_SAFETY_MAX_PEERS=120
-DISK_SAFETY_MAX_REQUESTS_PER_PEER=24
 ```
 
-4. Start backend:
+*(Note: RawTorrent generally provisions internal temporary paths automatically based on the detected OS).*
 
-```bash
-cd rawtorrent_backend
-npm run dev
-```
+---
 
-5. Start frontend:
+## 📄 License
 
-```bash
-npm run dev
-```
-
-6. Open the app:
-
-- Frontend: http://localhost:3000
-- Backend: http://localhost:4000
-
-## Docker Hub Images
-
-If you don't want to build from source, you can use the official pre-built images:
-
-- **Frontend**: `abhijitkad/rawtorrent-frontend:latest`
-- **Backend**: `abhijitkad/rawtorrent-backend:latest`
-
-## Docker Deployment
-
-### 1. Using Pre-built Images (Recommended)
-
-The easiest way to run RawTorrent is using the `docker-compose.hub.yml` file which pulls images directly from Docker Hub.
-
-#### Running without Cloning (Quick Start)
-If you don't want to clone the whole repository, you only need the `docker-compose.hub.yml` file.
-
-**On Windows (PowerShell):**
-```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/CodeSageAbhijit/raw-torrent/main/docker-compose.hub.yml" -OutFile "docker-compose.yml"
-docker compose up -d
-```
-
-**On Linux/macOS (curl):**
-```bash
-curl -L https://raw.githubusercontent.com/CodeSageAbhijit/raw-torrent/main/docker-compose.hub.yml -o docker-compose.yml
-docker compose up -d
-```
-
-#### Running with the Full Repository
-If you have cloned the repository, just run:
-```bash
-docker compose -f docker-compose.hub.yml up -d
-```
-
-3. Open http://localhost:3000
-
-### 2. Building from Source
-
-If you have cloned the repository and want to build locally:
-
-```bash
-docker compose up --build -d
-```
-
-### Configuration (Optional)
-
-By default, Docker will create a folder named `downloads` in your current directory to store your files.
-
-**If you want to use a different folder (e.g., `D:/MyTorrents`):**
-1. Create a file named `.env` in the same folder as your `docker-compose.yml`.
-2. Add this line:
-   ```env
-   RAWTORRENT_DOWNLOADS_DIR=D:/MyTorrents
-   ```
-3. Run `docker compose up -d` again.
-
-- `RAWTORRENT_DOWNLOADS_DIR`: Path on your host to store downloads (defaults to `./downloads`).
-- `AUTO_RESUME_ON_BOOT`: Set to `true` (default) to resume active torrents when the container restarts.
-- `WEBTORRENT_UTP`: Set to `false` (default) to disable uTP if you experience network instability in Docker.
-
-
-## Project Structure
-
-- `app/(dashboard)/*` - Main dashboard, controls, and analytics pages
-- `app/api/settings/route.ts` - Frontend settings proxy to backend
-- `components/*` - Shared UI components
-- `lib/backend.ts` - Backend URL helpers for frontend
-- `rawtorrent_backend/src/routes/*` - Backend API routes
-- `rawtorrent_backend/src/services/*` - Core torrent/session logic
-- `rawtorrent_backend/src/ws/socket.ts` - WebSocket broadcasting
-
-## License
-
-MIT
+MIT © RawTorrent Contributors.

@@ -36,7 +36,7 @@ const DEFAULT_SETTINGS: Settings = {
   enableDHT: process.env.ENABLE_DHT_DISCOVERY !== "false",
   pieceSelectionStrategy: "rarest-first",
   peerConnectionTimeoutMs: parseInt(process.env.PEER_CONNECTION_TIMEOUT_MS || "12000"),
-  turboMode: true,
+  turboMode: false,
   adaptiveTuning: true,
   extraTrackers: [
     "udp://tracker.opentrackr.org:1337/announce",
