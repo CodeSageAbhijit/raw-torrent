@@ -1,30 +1,11 @@
 import type { ParsedTorrentFile, TrackerPeerDescriptor } from "../types/torrent";
 import { logger } from "../utils/logger";
+import { DHT_DISCOVERY_TIMEOUT_MS } from "./discovery/constants";
+import { getBootstrapNodes } from "./discovery/bootstrap";
+import type { DhtLike } from "./discovery/types";
 
 type DynamicImport = (specifier: string) => Promise<unknown>;
 const dynamicImport = new Function("specifier", "return import(specifier)") as DynamicImport;
-
-interface DhtLike {
-  on: (event: string, listener: (...args: unknown[]) => void) => void;
-  listen: (port?: number) => void;
-  lookup: (infoHash: string | Buffer) => void;
-  destroy: () => void;
-}
-
-// Default bootstrap nodes for DHT - these are well-known public DHT nodes
-const DEFAULT_BOOTSTRAP_NODES = [
-  "router.bittorrent.com:6881",
-  "dht.transmissionbt.com:6881",
-  "router.utorrent.com:6881",
-  "dht.aelitis.com:6881",
-  "router.silotis.us:6881",
-];
-
-const DHT_DISCOVERY_TIMEOUT_MS = 15000;
-
-const parseBootstrapNodes = (): string[] => {
-  return DEFAULT_BOOTSTRAP_NODES;
-};
 
 export const discoverPeersFromDht = async (
   torrent: ParsedTorrentFile,
@@ -48,7 +29,7 @@ export const discoverPeersFromDht = async (
       let lookupCount = 0;
       const maxLookups = 3; // Multiple lookups to find more peers
 
-      const bootstrapNodes = parseBootstrapNodes();
+      const bootstrapNodes = getBootstrapNodes();
 
       const dht = new DhtClient({
         bootstrap: bootstrapNodes,

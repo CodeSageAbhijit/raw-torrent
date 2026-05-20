@@ -13,67 +13,18 @@ import {
   piecePath,
   type SessionStoragePaths,
 } from "../services/fileStorageService";
+import { BLOCK_SIZE, MAX_REQUESTS_PER_PEER, REQUEST_TIMEOUT_MS } from "./download/constants";
+import { assembleFileOnDisk } from "./download/fileAssembler";
+import { assemblePieceData, verifyPieceHash } from "./download/pieceAssembler";
+import type {
+  DownloadManagerOptions,
+  DownloadProgress,
+  PeerDownloadState,
+  PendingRequest,
+  PieceDownloadState,
+} from "./download/types";
 
-// Standard BitTorrent block size: 16KB
-const BLOCK_SIZE = 16384;
-// Max concurrent requests per peer
-const MAX_REQUESTS_PER_PEER = 10;
-// Request timeout
-const REQUEST_TIMEOUT_MS = 30000;
-
-export interface DownloadProgress {
-  totalBytes: number;
-  downloadedBytes: number;
-  progress: number;
-  downloadSpeed: number;
-  uploadSpeed: number;
-  activePeers: number;
-  piecesCompleted: number;
-  piecesTotal: number;
-  eta: number; // seconds
-}
-
-export interface PeerDownloadState {
-  peerId: string;
-  ip: string;
-  port: number;
-  connection: PeerConnection;
-  bitfield: Set<number>; // Pieces this peer has
-  choked: boolean;
-  interested: boolean;
-  downloadedBytes: number;
-  uploadedBytes: number;
-  pendingRequests: Map<string, PendingRequest>; // "pieceIndex:offset" -> request
-  lastActivity: number;
-}
-
-interface PendingRequest {
-  pieceIndex: number;
-  offset: number;
-  length: number;
-  timestamp: number;
-  timeout: NodeJS.Timeout;
-}
-
-interface PieceDownloadState {
-  index: number;
-  hash: string;
-  totalLength: number;
-  blocks: Map<number, Buffer>; // offset -> data
-  blocksNeeded: number;
-  blocksReceived: number;
-  assignedPeer: string | null;
-}
-
-export interface DownloadManagerOptions {
-  sessionId: string;
-  infoHash: string;
-  pieceHashes: string[];
-  pieceLength: number;
-  totalLength: number;
-  fileName: string;
-  savePath?: string;
-}
+export type { DownloadManagerOptions, DownloadProgress, PeerDownloadState } from "./download/types";
 
 export class DownloadManager extends EventEmitter {
   private readonly sessionId: string;
@@ -361,22 +312,11 @@ export class DownloadManager extends EventEmitter {
     const piece = this.pieces.get(pieceIndex);
     if (!piece) return;
 
-    // Assemble blocks in order
-    const sortedOffsets = Array.from(piece.blocks.keys()).sort((a, b) => a - b);
-    const buffers: Buffer[] = [];
-    
-    for (const offset of sortedOffsets) {
-      const block = piece.blocks.get(offset);
-      if (block) buffers.push(block);
-    }
+    const pieceData = assemblePieceData(piece.blocks);
 
-    const pieceData = Buffer.concat(buffers);
-
-    // Verify SHA1 hash
-    const hash = crypto.createHash("sha1").update(pieceData).digest("hex");
-    
-    if (hash !== piece.hash) {
-      logger.warn(`Piece ${pieceIndex} hash mismatch! Expected: ${piece.hash}, Got: ${hash}`);
+    if (!verifyPieceHash(pieceData, piece.hash)) {
+      const receivedHash = crypto.createHash("sha1").update(pieceData).digest("hex");
+      logger.warn(`Piece ${pieceIndex} hash mismatch! Expected: ${piece.hash}, Got: ${receivedHash}`);
       // Reset piece and retry
       piece.blocks.clear();
       piece.blocksReceived = 0;
@@ -391,9 +331,11 @@ export class DownloadManager extends EventEmitter {
     piece.blocks.clear(); // Free memory
     this.persistStateToDisk();
 
+    const verifiedHash = piece.hash;
+
     this.emit("piece_verified", {
       pieceIndex,
-      hash,
+      hash: verifiedHash,
       length: pieceData.length,
     });
 
@@ -526,30 +468,7 @@ export class DownloadManager extends EventEmitter {
   }
 
   private assembleFileOnDisk(): { path: string; size: number } {
-    const fileDescriptor = fs.openSync(this.storage.finalFilePath, "w");
-
-    try {
-      let offset = 0;
-
-      for (let index = 0; index < this.pieceHashes.length; index += 1) {
-        const currentPiecePath = piecePath(this.storage, index);
-
-        if (!fs.existsSync(currentPiecePath)) {
-          throw new Error(`Missing piece file ${index} during final assembly`);
-        }
-
-        const chunk = fs.readFileSync(currentPiecePath);
-        fs.writeSync(fileDescriptor, chunk, 0, chunk.length, offset);
-        offset += chunk.length;
-      }
-
-      return {
-        path: this.storage.finalFilePath,
-        size: offset,
-      };
-    } finally {
-      fs.closeSync(fileDescriptor);
-    }
+    return assembleFileOnDisk(this.storage, this.pieceHashes.length);
   }
 
   start(): void {
